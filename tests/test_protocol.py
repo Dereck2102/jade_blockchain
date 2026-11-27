@@ -363,6 +363,111 @@ class SignerPersistenceTests(unittest.TestCase):
         self.assertIn("r-2", remaining)
         self.assertEqual(remaining["r-3-pending"], e3_pending)
 
+    def test_cli_handles_cp1252_stdout_without_unicode_error(self):
+        import io
+        from unittest.mock import patch
+        from jadeblock.cli import main
+
+        events_path = Path(self.temporary.name) / "cp1252-events.jsonl"
+        state_dir = Path(self.temporary.name) / "cp1252-signer"
+        pub_path = Path(self.temporary.name) / "cp1252-pub.b64"
+
+        signer = EventSigner(state_dir)
+        signer.sign(BODY, "unicode-snow")  # Contiene '雪' (\u96ea), no representable en cp1252
+
+        raw_out = io.BytesIO()
+        cp1252_stdout = io.TextIOWrapper(raw_out, encoding="cp1252", errors="strict")
+        with patch("sys.stdout", cp1252_stdout):
+            exit_code = main(
+                [
+                    "generate",
+                    "--events",
+                    str(events_path),
+                    "--state-dir",
+                    str(state_dir),
+                    "--public-key",
+                    str(pub_path),
+                    "--node",
+                    BODY["nodo"],
+                    "--request-id",
+                    "unicode-snow",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        decoded = raw_out.getvalue().decode("utf-8")
+        self.assertIn("café 雪", decoded)
+
+    def test_callback_backend_and_enclave_ipc_protocol(self):
+        from unittest.mock import patch
+        from jadeblock.backends import CallbackSignerBackend, EnclaveSignerClient
+        from jadeblock.cli import main
+        from jadeblock.enclave_server import dispatch_signer_request
+        from jadeblock.protocol import strict_json_dumps
+
+        key = Ed25519PrivateKey.generate()
+        bad_backend = CallbackSignerBackend(key.public_key(), lambda _msg: b"short")
+        with self.assertRaises(RuntimeError):
+            EventSigner(Path(self.temporary.name) / "bad-backend", backend=bad_backend).sign(
+                BODY, "bad-1"
+            )
+
+        enclave_dir = Path(self.temporary.name) / "enclave-state"
+        enclave_signer = EventSigner(
+            enclave_dir,
+            backend=CallbackSignerBackend(key.public_key(), key.sign),
+        )
+
+        def fake_request(_self, payload: dict) -> dict:
+            raw = (strict_json_dumps(payload) + "\n").encode("utf-8")
+            resp = dispatch_signer_request(enclave_signer, raw)
+            if not resp.get("ok"):
+                raise RuntimeError(resp.get("error", "err"))
+            return resp
+
+        events_path = Path(self.temporary.name) / "ipc-events.jsonl"
+        pub_path = Path(self.temporary.name) / "ipc-pub.b64"
+        status_path = Path(self.temporary.name) / "ipc-status.json"
+        with patch.object(EnclaveSignerClient, "_request", fake_request):
+            rc1 = main(
+                [
+                    "generate",
+                    "--signer-endpoint",
+                    "127.0.0.1:9201",
+                    "--events",
+                    str(events_path),
+                    "--public-key",
+                    str(pub_path),
+                    "--signer-status",
+                    str(status_path),
+                    "--node",
+                    "enclave-node",
+                    "--request-id",
+                    "ipc-1",
+                ]
+            )
+            rc1_retry = main(
+                [
+                    "generate",
+                    "--signer-endpoint",
+                    "127.0.0.1:9201",
+                    "--events",
+                    str(events_path),
+                    "--public-key",
+                    str(pub_path),
+                    "--signer-status",
+                    str(status_path),
+                    "--node",
+                    "enclave-node",
+                    "--request-id",
+                    "ipc-1",
+                ]
+            )
+        self.assertEqual(rc1, 0)
+        self.assertEqual(rc1_retry, 0)
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["firma_n"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
