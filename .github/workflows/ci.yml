@@ -60,6 +60,18 @@ jobs:
             --public-key /data/trusted-public-key.b64 \
             --node demo-node \
             --request-id ci-demo-001
+          docker compose --profile synthetic run --rm demo generate \
+            --events /data/events.jsonl \
+            --state-dir /data/signer \
+            --public-key /data/trusted-public-key.b64 \
+            --node demo-node \
+            --request-id ci-demo-001
+          docker compose --profile synthetic run --rm demo generate \
+            --events /data/events.jsonl \
+            --state-dir /data/signer \
+            --public-key /data/trusted-public-key.b64 \
+            --node demo-node \
+            --request-id ci-demo-002
           docker compose --profile synthetic run --rm anchor
           docker compose --profile synthetic run --rm verifier
       - name: Stop local demo services

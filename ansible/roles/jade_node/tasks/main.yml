@@ -42,6 +42,7 @@
     owner: root
     group: root
     mode: "0644"
+  notify: Reiniciar exportador JaDe
 
 - name: Instalar paquete Python
   ansible.builtin.copy:
@@ -49,14 +50,18 @@
     dest: /opt/jade/jadeblock/
     owner: root
     group: root
-    mode: preserve
+    mode: "0644"
+    directory_mode: "0755"
+  notify: Reiniciar exportador JaDe
 
 - name: Crear entorno virtual e instalar JaDe
   ansible.builtin.pip:
     name: /opt/jade
     virtualenv: /opt/jade/venv
     virtualenv_command: python3 -m venv
+    extra_args: "--upgrade"
     state: present
+  notify: Reiniciar exportador JaDe
 
 - name: Instalar unidad systemd de métricas
   ansible.builtin.template:
