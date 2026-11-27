@@ -5,6 +5,7 @@ import {
   compileRegistry,
   createRpcProvider,
   fetchVerifierSnapshot,
+  indexByNodeAndCounter,
   parseVerifiedLedger,
   signatureDigestHex,
   toSafeCounter,
@@ -95,9 +96,12 @@ async function anchorLatestOnce({ allowMissingEvidence = false } = {}) {
     const local = validateLocalAnchors(
       fs.existsSync(anchorsPath) ? JSON.parse(fs.readFileSync(anchorsPath, "utf8")) : []
     );
+    const eventsIndex = indexByNodeAndCounter(events);
+    const anchorsIndex = indexByNodeAndCounter(local);
+    const nodeBucket = eventsIndex.get(nodeName);
+    const nodeAnchorBucket = anchorsIndex.get(nodeName);
     const remoteCounter = toSafeCounter(await contract.lastCounter(nodeName), "lastCounter");
-    const localCounters = local
-      .filter((anchor) => anchor.nodo === nodeName)
+    const localCounters = (nodeAnchorBucket?.list ?? [])
       .map((anchor) => anchor.firma_n)
       .sort((a, b) => a - b);
     if (localCounters.some((counter, index) => index > 0 && counter <= localCounters[index - 1])) {
@@ -107,7 +111,7 @@ async function anchorLatestOnce({ allowMissingEvidence = false } = {}) {
     if (remoteCounter < localCounter) {
       throw new Error(`Regresión remota: cadena=${remoteCounter}, estado local=${localCounter}`);
     }
-    const nodeEvents = events.filter((event) => event.nodo === nodeName);
+    const nodeEvents = nodeBucket?.list ?? [];
     if (!nodeEvents.length) throw new Error(`No hay eventos locales para ${nodeName}`);
     const maxEventCounter = nodeEvents.at(-1).firma_n;
     if (remoteCounter > maxEventCounter) {
@@ -117,7 +121,7 @@ async function anchorLatestOnce({ allowMissingEvidence = false } = {}) {
     const checkpointsToVerify = [...new Set([...localCounters, ...(remoteCounter > 0 ? [remoteCounter] : [])])]
       .sort((a, b) => a - b);
     for (const counter of checkpointsToVerify) {
-      const event = nodeEvents.find((item) => item.firma_n === counter);
+      const event = nodeBucket.byCounter.get(counter);
       const remoteHash = await contract.eventHashAt(nodeName, counter);
       const expectedSigHash = event ? signatureDigestHex(event.firma) : "";
       const remoteSignatureHash = await contract.signatureHashAt(nodeName, counter);
@@ -125,7 +129,7 @@ async function anchorLatestOnce({ allowMissingEvidence = false } = {}) {
         await contract.anchorTimestampAt(nodeName, counter),
         "anchorTimestampAt"
       );
-      const localEntry = local.find((anchor) => anchor.nodo === nodeName && anchor.firma_n === counter);
+      const localEntry = nodeAnchorBucket?.byCounter.get(counter);
       if (
         !event
         || remoteHash.toLowerCase() !== `0x${event.hash}`.toLowerCase()

@@ -13,7 +13,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .backends import FileEd25519Backend, SignerBackend
 from .protocol import (
-    HEX_64_RE,
     MAX_SAFE_COUNTER,
     event_body,
     event_hash,
@@ -100,34 +99,63 @@ def _status_payload(counter: int, pub_b64: str) -> bytes:
     return f"jade-signer-status|{counter}|{pub_b64}".encode("utf-8")
 
 
+def verify_signer_status_manifest(data: object, trusted_key: Ed25519PublicKey | None) -> bool:
+    """Verifica un diccionario de manifiesto de salud contra la clave pública confiable."""
+    if trusted_key is None or not isinstance(data, dict):
+        return False
+    counter = data.get("counter")
+    pub_b64 = data.get("public_key")
+    sig_b64 = data.get("probe_signature")
+    if (
+        isinstance(counter, bool)
+        or not isinstance(counter, int)
+        or counter < 0
+        or counter > MAX_SAFE_COUNTER
+        or not isinstance(pub_b64, str)
+        or not isinstance(sig_b64, str)
+    ):
+        return False
+    expected_pub = base64.b64encode(public_key_bytes(trusted_key)).decode("ascii")
+    if pub_b64 != expected_pub:
+        return False
+    try:
+        sig = base64.b64decode(sig_b64, validate=True)
+        trusted_key.verify(sig, _status_payload(counter, pub_b64))
+        return True
+    except (ValueError, TypeError, InvalidSignature):
+        return False
+
+
 def verify_signer_status_file(status_path: Path, trusted_key: Ed25519PublicKey | None) -> bool:
     """Verifica el manifiesto público de salud del firmador sin acceder a la clave privada."""
     if trusted_key is None or not status_path.is_file():
         return False
     try:
         data = strict_json_loads(status_path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return False
-        counter = data.get("counter")
-        pub_b64 = data.get("public_key")
-        sig_b64 = data.get("probe_signature")
-        if (
-            isinstance(counter, bool)
-            or not isinstance(counter, int)
-            or counter < 0
-            or counter > MAX_SAFE_COUNTER
-            or not isinstance(pub_b64, str)
-            or not isinstance(sig_b64, str)
-        ):
-            return False
-        expected_pub = base64.b64encode(public_key_bytes(trusted_key)).decode("ascii")
-        if pub_b64 != expected_pub:
-            return False
-        sig = base64.b64decode(sig_b64, validate=True)
-        trusted_key.verify(sig, _status_payload(counter, pub_b64))
-        return True
-    except (OSError, UnicodeError, ValueError, TypeError, InvalidSignature):
+        return verify_signer_status_manifest(data, trusted_key)
+    except (OSError, UnicodeError, ValueError, TypeError):
         return False
+
+
+def _prune_requests_dict(
+    requests: dict,
+    recorded_hashes: set[str],
+    max_retained: int = MAX_RETAINED_CONFIRMED_REQUESTS,
+) -> dict:
+    if len(requests) <= max_retained:
+        return requests
+    confirmed_ids = [
+        req_id
+        for req_id, entry in requests.items()
+        if isinstance(entry, dict)
+        and isinstance(entry.get("event"), dict)
+        and entry["event"].get("hash") in recorded_hashes
+    ]
+    if len(confirmed_ids) <= max_retained:
+        return requests
+    confirmed_ids.sort(key=lambda req_id: requests[req_id]["event"].get("firma_n", 0))
+    to_drop = set(confirmed_ids[: len(confirmed_ids) - max_retained])
+    return {req_id: entry for req_id, entry in requests.items() if req_id not in to_drop}
 
 
 class EventSigner:
@@ -149,9 +177,13 @@ class EventSigner:
             else:
                 self._new_key_created = not self.state_path.exists()
                 self.backend = backend
+        self._pub_b64 = base64.b64encode(public_key_bytes(self.backend.public_key())).decode("ascii")
 
     def public_key(self) -> Ed25519PublicKey:
         return self.backend.public_key()
+
+    def public_key_b64(self) -> str:
+        return self._pub_b64
 
     def sign_challenge(self, challenge: bytes) -> bytes:
         return self.backend.sign_message(challenge)
@@ -161,18 +193,33 @@ class EventSigner:
 
     def build_status_manifest(self, counter: int | None = None) -> dict:
         current = self.counter() if counter is None else counter
-        pub_b64 = base64.b64encode(public_key_bytes(self.public_key())).decode("ascii")
-        sig = self.backend.sign_message(_status_payload(current, pub_b64))
+        sig = self.backend.sign_message(_status_payload(current, self._pub_b64))
         return {
             "counter": current,
-            "public_key": pub_b64,
+            "public_key": self._pub_b64,
             "probe_signature": base64.b64encode(sig).decode("ascii"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def write_status_manifest(self, target_path: Path | None = None, counter: int | None = None) -> None:
+    def write_status_manifest(self, target_path: Path | None = None, counter: int | None = None) -> dict:
         manifest = self.build_status_manifest(counter=counter)
         _atomic_json(target_path or self.status_path, manifest, mode=0o644)
+        return manifest
+
+    @staticmethod
+    def _extract_events_from_state(state: dict) -> dict[str, dict]:
+        requests = state["requests"]
+        events: dict[str, dict] = {}
+        for request_id, request in requests.items():
+            if not isinstance(request, dict) or not isinstance(request.get("event"), dict):
+                raise RuntimeError("Registro de solicitud del firmador mal formado")
+            events[request_id] = request["event"]
+        return events
+
+    def load_requests_snapshot(self) -> tuple[int, dict[str, dict]]:
+        """Carga en una sola lectura el contador y el mapa de eventos firmados."""
+        state = self._load_state()
+        return state["counter"], self._extract_events_from_state(state)
 
     def request_result(self, request_id: str) -> dict | None:
         requests = self._load_state()["requests"]
@@ -184,13 +231,7 @@ class EventSigner:
         return entry["event"]
 
     def request_events(self) -> dict[str, dict]:
-        requests = self._load_state()["requests"]
-        events = {}
-        for request_id, request in requests.items():
-            if not isinstance(request, dict) or not isinstance(request.get("event"), dict):
-                raise RuntimeError("Registro de solicitud del firmador mal formado")
-            events[request_id] = request["event"]
-        return events
+        return self._extract_events_from_state(self._load_state())
 
     def prune_confirmed_requests(
         self,
@@ -202,22 +243,10 @@ class EventSigner:
             if not self.state_path.exists():
                 return
             state = self._load_state()
-            requests = state["requests"]
-            confirmed_ids = [
-                req_id
-                for req_id, entry in requests.items()
-                if isinstance(entry, dict)
-                and isinstance(entry.get("event"), dict)
-                and entry["event"].get("hash") in recorded_hashes
-            ]
-            if len(confirmed_ids) <= max_retained:
-                return
-            confirmed_ids.sort(key=lambda req_id: requests[req_id]["event"].get("firma_n", 0))
-            to_drop = set(confirmed_ids[: len(confirmed_ids) - max_retained])
-            state["requests"] = {
-                req_id: entry for req_id, entry in requests.items() if req_id not in to_drop
-            }
-            _atomic_json(self.state_path, state)
+            pruned = _prune_requests_dict(state["requests"], recorded_hashes, max_retained)
+            if len(pruned) != len(state["requests"]):
+                state["requests"] = pruned
+                _atomic_json(self.state_path, state)
 
     def _load_state(self) -> dict:
         if not self.state_path.exists():
@@ -244,7 +273,14 @@ class EventSigner:
                 f"Estado del firmador ilegible; no se reinicia el contador: {self.state_path}"
             ) from exc
 
-    def sign(self, body: dict, request_id: str) -> dict:
+    def sign(
+        self,
+        body: dict,
+        request_id: str,
+        *,
+        status_target: Path | None = None,
+        recorded_hashes: set[str] | None = None,
+    ) -> dict:
         if not isinstance(request_id, str) or not request_id or len(request_id) > 200:
             raise ValueError("request_id debe ser texto de entre 1 y 200 caracteres")
         request_digest = event_hash(body)
@@ -267,8 +303,10 @@ class EventSigner:
                 "firma_n": next_counter,
             }
             state["counter"] = next_counter
+            if recorded_hashes is not None:
+                state["requests"] = _prune_requests_dict(state["requests"], recorded_hashes)
             state["requests"][request_id] = {"input_hash": request_digest, "event": event}
             _atomic_json(self.state_path, state)
             self._new_key_created = False
-            self.write_status_manifest(counter=next_counter)
+            self.write_status_manifest(target_path=status_target, counter=next_counter)
             return event

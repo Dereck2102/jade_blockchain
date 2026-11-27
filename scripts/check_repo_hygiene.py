@@ -62,6 +62,13 @@ CONTENT_RULES = (
     ),
 )
 
+FAST_LINE_PREFILTER = re.compile(
+    r"(-----BEGIN|ghp_|gho_|ghs_|github_pat_|AKIA|AIza|tskey-|xox[bap]-|"
+    r"![A-Za-z0-9._-]+=[0-9a-fA-F]{8}-|\b0x[0-9a-fA-F]{16}|"
+    r":\\{1,2}Users\\|/home/|/Users/|DESKTOP-|LAPTOP-|STJFN1P|Hanssel31|"
+    r"(?:10|192\.168|172\.|100\.)[0-9])"
+)
+
 SKIP_CONTENT_FILES = {
     "chain/package-lock.json",
     "scripts/check_repo_hygiene.py",
@@ -113,6 +120,8 @@ def scan_paths(paths: list[str], root: Path = Path(".")) -> list[str]:
         if content is None:
             continue
         for line_number, line in enumerate(content.splitlines(), 1):
+            if not FAST_LINE_PREFILTER.search(line):
+                continue
             for label, regex in CONTENT_RULES:
                 if regex.search(line):
                     findings.append(f"{normalized}:{line_number}: posible {label}")

@@ -9,6 +9,7 @@ import {
   MAX_SAFE_BIGINT,
   atomicWriteJson,
   compileRegistry,
+  indexByNodeAndCounter,
   parseVerifiedLedger,
   toSafeCounter,
   validateLocalAnchors,
@@ -81,6 +82,8 @@ test("atomicWriteJson and withFileLock persist safely", async () => {
     const saved = JSON.parse(fs.readFileSync(target, "utf8"));
     assert.equal(saved[0].firma_n, 1);
     assert.equal(fs.existsSync(lock), false);
+    const indexed = indexByNodeAndCounter(saved);
+    assert.equal(indexed.get("demo-node").byCounter.get(1).hash, "c".repeat(64));
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

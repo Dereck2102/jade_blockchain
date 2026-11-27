@@ -5,6 +5,7 @@ import {
   compileRegistry,
   createRpcProvider,
   fetchVerifierSnapshot,
+  indexByNodeAndCounter,
   parseVerifiedLedger,
   signatureDigestHex,
   toSafeCounter,
@@ -97,10 +98,9 @@ try {
   }
   output.anchor_coverage.contract_source_verified = true;
 
-  const nodes = [...new Set([
-    ...events.map((event) => event.nodo),
-    ...localAnchors.map((anchor) => anchor.nodo),
-  ])].sort();
+  const eventsIndex = indexByNodeAndCounter(events);
+  const anchorsIndex = indexByNodeAndCounter(localAnchors);
+  const nodes = [...new Set([...eventsIndex.keys(), ...anchorsIndex.keys()])].sort();
 
   let anyRemoteAnchor = false;
   let invalidAnchor = false;
@@ -113,8 +113,10 @@ try {
       throw new Error(`El emisor autorizado de ${node} difiere del registrado en el despliegue`);
     }
 
-    const nodeEvents = events.filter((event) => event.nodo === node);
-    const nodeLocal = localAnchors.filter((anchor) => anchor.nodo === node);
+    const nodeEventBucket = eventsIndex.get(node);
+    const nodeAnchorBucket = anchorsIndex.get(node);
+    const nodeEvents = nodeEventBucket?.list ?? [];
+    const nodeLocal = nodeAnchorBucket?.list ?? [];
     const orderedLocalCounters = nodeLocal.map((anchor) => anchor.firma_n).sort((a, b) => a - b);
     if (orderedLocalCounters.some((counter, index) => index > 0 && counter <= orderedLocalCounters[index - 1])) {
       throw new Error(`Duplicado o regresión local de ancla para ${node}`);
@@ -135,7 +137,7 @@ try {
       ...(remoteCounter > 0 ? [remoteCounter] : []),
     ])].sort((a, b) => a - b);
     for (const counter of checkpointsToVerify) {
-      const event = nodeEvents.find((entry) => entry.firma_n === counter);
+      const event = nodeEventBucket?.byCounter.get(counter);
       if (!event) throw new Error(`Falta evento local ${node}/${counter}`);
       const remoteEventHash = await registry.eventHashAt(node, counter);
       const remoteSignatureHash = await registry.signatureHashAt(node, counter);
@@ -144,7 +146,7 @@ try {
         await registry.anchorTimestampAt(node, counter),
         "anchorTimestampAt"
       );
-      const localAnchor = nodeLocal.find((anchor) => anchor.firma_n === counter);
+      const localAnchor = nodeAnchorBucket?.byCounter.get(counter);
       if (
         remoteEventHash.toLowerCase() !== `0x${event.hash}`.toLowerCase()
         || remoteSignatureHash.toLowerCase() !== signatureHash.toLowerCase()

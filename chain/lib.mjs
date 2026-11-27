@@ -214,4 +214,18 @@ export function signatureDigestHex(base64Signature) {
   return `0x${crypto.createHash("sha256").update(Buffer.from(base64Signature, "base64")).digest("hex")}`;
 }
 
+export function indexByNodeAndCounter(items) {
+  const byNode = new Map();
+  for (const item of items) {
+    let bucket = byNode.get(item.nodo);
+    if (!bucket) {
+      bucket = { list: [], byCounter: new Map() };
+      byNode.set(item.nodo, bucket);
+    }
+    bucket.list.push(item);
+    bucket.byCounter.set(item.firma_n, item);
+  }
+  return byNode;
+}
+
 export { ZeroAddress };
