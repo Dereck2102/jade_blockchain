@@ -1,0 +1,19 @@
+# <tipo>(<alcance>): <descripción en imperativo, ≤ 72 caracteres>
+#
+# Tipos: feat fix docs test refactor perf build ci chore revert
+# Alcances: protocol signer verify cli metrics chain contract compose
+#           infra ansible observability ci docs deps
+# Cambio incompatible: añade "!" tras el alcance y el pie BREAKING CHANGE.
+#
+# Cuerpo: qué cambia y por qué (no cómo). Indica qué se probó realmente.
+#
+# Pies (uno por línea, al final):
+# Refs: #<issue>
+# BREAKING CHANGE: <descripción y migración>
+# Co-authored-by: Nombre Apellido <correo-o-noreply-de-GitHub>
+# Assisted-by: <Herramienta>:<modelo> [herramientas auxiliares]
+#   Ej.: Assisted-by: Claude:claude-opus-5.5 Antigravity
+#        Assisted-by: ChatGPT:astra-6
+#        Assisted-by: GitHub-Copilot:coding-agent
+#
+# Activar esta plantilla: git config commit.template .gitmessage

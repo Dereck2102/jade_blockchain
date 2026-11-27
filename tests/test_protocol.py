@@ -104,7 +104,7 @@ class EventProtocolTests(unittest.TestCase):
         self.assertEqual(result["anchor_coverage"]["status"], "invalid")
         self.assertEqual(result["status"], "invalid")
 
-    def test_anchor_gap_is_not_mistaken_for_a_complete_prefix(self):
+    def test_checkpoint_anchor_covers_verified_prefix(self):
         second = sign_event(
             {**BODY, "hash_anterior": self.event["hash"], "tipo": "segundo"},
             2,
@@ -115,7 +115,36 @@ class EventProtocolTests(unittest.TestCase):
             self.key.public_key(),
             [{"nodo": "nodo-á", "firma_n": 2, "hash": second["hash"]}],
         )
+        self.assertEqual(result["status"], "incomplete")
+        self.assertEqual(result["anchor_coverage"]["status"], "local_only")
+        self.assertEqual(result["anchor_coverage"]["anchored_prefix_by_node"], {"nodo-á": 2})
+        self.assertEqual(result["anchor_coverage"]["pending_events_by_node"], {})
+
+    def test_checkpoint_anchor_does_not_cover_broken_prefix(self):
+        second = sign_event(
+            {**BODY, "hash_anterior": self.event["hash"], "tipo": "segundo"},
+            2,
+            self.key,
+        )
+        result = verify_evidence(
+            [second],
+            self.key.public_key(),
+            [{"nodo": "nodo-á", "firma_n": 2, "hash": second["hash"]}],
+        )
         self.assertEqual(result["anchor_coverage"]["status"], "invalid")
+        self.assertEqual(result["status"], "invalid")
+
+    def test_duplicate_anchor_is_rejected(self):
+        result = verify_evidence(
+            [self.event],
+            self.key.public_key(),
+            [
+                {"nodo": "nodo-á", "firma_n": 1, "hash": self.event["hash"]},
+                {"nodo": "nodo-á", "firma_n": 1, "hash": self.event["hash"]},
+            ],
+        )
+        self.assertEqual(result["anchor_coverage"]["status"], "invalid")
+        self.assertEqual(result["status"], "invalid")
 
 
 class SignerPersistenceTests(unittest.TestCase):

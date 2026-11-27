@@ -16,21 +16,33 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from .protocol import event_body, event_hash, sign_event
 
 
+def _fsync_directory(path: Path) -> None:
+    """Persiste las entradas del directorio en POSIX.
+
+    Windows no permite abrir directorios con ``os.open``; allí NTFS registra
+    los metadatos del ``os.replace`` y se omite este paso.
+    """
+    if os.name == "nt":
+        return
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _atomic_json(path: Path, value: dict, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        os.fchmod(fd, mode)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(value, stream, ensure_ascii=False, sort_keys=True)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        _fsync_directory(path.parent)
     except BaseException:
         try:
             os.unlink(temporary)
@@ -67,11 +79,7 @@ class EventSigner:
                 stream.write(base64.b64encode(raw))
                 stream.flush()
                 os.fsync(stream.fileno())
-            directory_fd = os.open(self.state_dir, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            _fsync_directory(self.state_dir)
             return key
         return Ed25519PrivateKey.from_private_bytes(raw)
 

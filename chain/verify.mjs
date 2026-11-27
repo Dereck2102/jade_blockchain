@@ -124,19 +124,24 @@ try {
     const nodeEvents = events.filter((event) => event.nodo === node);
     const nodeLocal = localAnchors.filter((anchor) => anchor.nodo === node);
     const orderedLocalCounters = nodeLocal.map((anchor) => anchor.firma_n).sort((a, b) => a - b);
-    if (orderedLocalCounters.some((counter, index) => counter !== index + 1)) {
-      throw new Error(`Hueco, duplicado o regresión local para ${node}`);
+    if (orderedLocalCounters.some((counter, index) => !Number.isSafeInteger(counter) || counter < 1 || (index > 0 && counter <= orderedLocalCounters[index - 1]))) {
+      throw new Error(`Duplicado, valor inválido o regresión local de ancla para ${node}`);
     }
     const localCounter = orderedLocalCounters.at(-1) ?? 0;
     const remoteCounter = Number(await registry.lastCounter(node));
     if (remoteCounter < localCounter) {
       throw new Error(`Regresión remota para ${node}: cadena=${remoteCounter}, local=${localCounter}`);
     }
-    if (remoteCounter > nodeEvents.length) {
+    const maxNodeCounter = nodeEvents.at(-1)?.firma_n ?? 0;
+    if (remoteCounter > maxNodeCounter) {
       throw new Error(`Anclas remotas sin eventos locales para ${node}`);
     }
     if (remoteCounter > 0) anyRemoteAnchor = true;
-    for (let counter = 1; counter <= remoteCounter; counter += 1) {
+    const checkpointsToVerify = [...new Set([
+      ...orderedLocalCounters,
+      ...(remoteCounter > 0 ? [remoteCounter] : []),
+    ])].sort((a, b) => a - b);
+    for (const counter of checkpointsToVerify) {
       const event = nodeEvents.find((entry) => entry.firma_n === counter);
       if (!event) throw new Error(`Falta evento local ${node}/${counter}`);
       const remoteEventHash = await registry.eventHashAt(node, counter);
@@ -157,8 +162,8 @@ try {
       }
     }
     output.anchor_coverage.anchored_prefix_by_node[node] = remoteCounter;
-    if (nodeEvents.length > remoteCounter) {
-      output.anchor_coverage.pending_events_by_node[node] = nodeEvents.length - remoteCounter;
+    if (maxNodeCounter > remoteCounter) {
+      output.anchor_coverage.pending_events_by_node[node] = maxNodeCounter - remoteCounter;
     }
   }
   output.anchor_coverage.checked = anyRemoteAnchor;

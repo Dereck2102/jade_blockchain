@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.py[cod]
@@ -7,6 +9,7 @@ __pycache__/
 node_modules/
 chain/node_modules/
 data/
+backups/
 *.tfstate
 *.tfstate.*
 *.tfplan
@@ -19,4 +22,12 @@ crash.log
 *.bak
 *.key
 *.pem
+*.p12
+*.pfx
 ansible/inventory/generated*
+*.retry
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

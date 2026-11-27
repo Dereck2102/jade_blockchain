@@ -1,0 +1,43 @@
+cff-version: 1.2.0
+message: "Si usas este software, cítalo con los metadatos de este archivo."
+type: software
+title: "JaDe Blockchain"
+abstract: >-
+  Base de investigación reproducible para inspección continua, integridad de
+  eventos con cadena SHA-256 y firma Ed25519, y anclaje en una red blockchain
+  privada Hyperledger Besu (QBFT). Deriva de un prototipo académico de
+  preservación de evidencia digital en entornos serverless simulados.
+authors:
+  - given-names: "Jacqueline Patricia"
+    family-names: "Andrango Mafla"
+  - given-names: "Dereck Stevens"
+    family-names: "Amacoria Chávez"
+version: "0.1.0"
+license: MIT
+repository-code: "https://github.com/Dereck2102/jade_blockchain"
+keywords:
+  - evidencia digital
+  - serverless
+  - inspección continua
+  - blockchain
+  - Hyperledger Besu
+  - Ed25519
+  - cadena de custodia
+references:
+  - type: thesis
+    title: >-
+      Desarrollo de un prototipo de sistema de inspección continua para
+      entornos serverless mediante enclaves seguros y tecnología blockchain,
+      para garantizar la integridad de evidencia digital en instituciones
+      públicas de Quito, año 2026
+    authors:
+      - given-names: "Jacqueline Patricia"
+        family-names: "Andrango Mafla"
+      - given-names: "Dereck Stevens"
+        family-names: "Amacoria Chávez"
+    year: 2026
+    institution:
+      name: "Instituto Superior Tecnológico San Antonio (TESA)"
+      city: "Quito"
+      country: EC
+    thesis-type: "Trabajo de fin de carrera, Tecnología Superior en Ciberseguridad"

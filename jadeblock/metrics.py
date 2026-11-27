@@ -126,7 +126,15 @@ def render_metrics() -> str:
                 if isinstance(anchor.get("anchored_at"), (int, float))
             ]
             newest_time = max(anchor_times, default=max(event_times, default=now))
-            pending = max(0, len(node_events) - anchored_counter)
+            max_event_counter = max(
+                (
+                    event.get("firma_n", 0)
+                    for event in node_events
+                    if isinstance(event.get("firma_n"), int) and not isinstance(event.get("firma_n"), bool)
+                ),
+                default=0,
+            )
+            pending = max(0, max(len(node_events), max_event_counter) - anchored_counter)
             integrity = int(result["integrity"]["ok"] and result["authenticity"]["ok"])
             lines.extend(
                 [

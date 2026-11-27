@@ -56,7 +56,13 @@ def verify_evidence(
         previous_hash = event.get("hash", "")
         node = event.get("nodo")
         counter = event.get("firma_n")
-        if not isinstance(node, str) or not isinstance(counter, int) or counter < 1:
+        if (
+            not isinstance(node, str)
+            or not node
+            or isinstance(counter, bool)
+            or not isinstance(counter, int)
+            or counter < 1
+        ):
             signatures_ok = False
             failures.append(f"contador o nodo inválido en evento {index}")
         elif counter != counters.get(node, 0) + 1:
@@ -88,14 +94,24 @@ def verify_evidence(
         anchor_ok = True
         last_by_node: dict[str, int] = {}
         for anchor in anchors:
-            node, counter = anchor.get("nodo"), anchor.get("firma_n")
-            if not isinstance(node, str) or not isinstance(counter, int):
+            if not isinstance(anchor, dict):
                 anchor_ok = False
                 failures.append("registro de ancla mal formado")
                 continue
-            if counter != last_by_node.get(node, 0) + 1:
+            node, counter = anchor.get("nodo"), anchor.get("firma_n")
+            if (
+                not isinstance(node, str)
+                or not node
+                or isinstance(counter, bool)
+                or not isinstance(counter, int)
+                or counter < 1
+            ):
                 anchor_ok = False
-                failures.append(f"regresión, hueco o duplicado de ancla para {node}")
+                failures.append("registro de ancla mal formado")
+                continue
+            if counter <= last_by_node.get(node, 0):
+                anchor_ok = False
+                failures.append(f"regresión o duplicado de ancla para {node}")
                 continue
             last_by_node[node] = counter
             covered_event = event_by_node_counter.get((node, counter))
@@ -109,6 +125,9 @@ def verify_evidence(
                 pending[node] = counter - covered.get(node, 0)
         if not anchor_ok:
             anchor_state = "invalid"
+        elif not chain_ok or not signatures_ok:
+            anchor_state = "invalid"
+            failures.append("el prefijo cubierto por el ancla no es íntegro o auténtico")
         elif not pending:
             anchor_state = "local_only"
 

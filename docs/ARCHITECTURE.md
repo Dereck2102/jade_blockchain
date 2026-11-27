@@ -10,9 +10,9 @@ Una especificación previa describe tres LXC Debian 12 (monitor y dos nodos), in
 2. `EventSigner` persiste una clave Ed25519, contador y resultados por `request_id`. Archivos escritos se sustituyen atómicamente, con `fsync` del archivo y directorio.
 3. El hash es SHA-256 del evento sin `hash`, `firma`, `firma_n` y `firma_error`, serializado como `json.dumps(evento, sort_keys=True, ensure_ascii=False).encode("utf-8")` con separadores predeterminados.
 4. El mensaje de firma es UTF-8 de `n|hash`; la firma Ed25519 se representa en base64. El primer `hash_anterior` contiene 64 ceros.
-5. El anclador comprueba secuencia, hash y firma fuera de cadena y publica hash de evento y hash de firma en el contrato.
-6. El contrato solo permite al emisor autorizado representar su nodo y exige contador creciente. Mantiene contador, hashes y marca de tiempo por nodo.
-7. El verificador local informa por separado integridad del ledger, autenticidad de las firmas y cobertura del prefijo de anclas, incluyendo eventos posteriores pendientes.
+5. El anclador comprueba secuencia, hash y firma fuera de cadena y publica en el contrato el último evento firmado (checkpoint de prefijo; con `ANCHOR_INTERVAL_SECONDS > 0` opera en modo periódico).
+6. El contrato solo permite al emisor autorizado representar su nodo y exige contador estrictamente creciente. Mantiene contador, hashes y marca de tiempo por nodo.
+7. El verificador local informa por separado integridad del ledger, autenticidad de las firmas y cobertura del prefijo de anclas (un checkpoint en `n` cubre `1..n` solo si la cadena y las firmas de ese prefijo son válidas), incluyendo eventos posteriores pendientes.
 
 La versión de protocolo es v1 y se mantiene separada del cuerpo JSON para no alterar el hash de referencia. El contrato almacena hashes; no verifica firmas Ed25519 en Solidity. La verificación pre-transacción es software en el anclador y no equivale a una prueba en cadena.
 
