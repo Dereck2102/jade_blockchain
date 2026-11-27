@@ -26,7 +26,8 @@ En arquitecturas efímeras (funciones serverless y contenedores de corta duraci�
 
 ## ¿Dónde está cada parte?
 
-- [`jadeblock/`](jadeblock) — Protocolo v1, firmador durable, CLI, verificador y métricas.
+- [`jadeblock/`](jadeblock) — Protocolo v1, firmador durable, adaptador `SignerBackend` (software, HSM/TPM o socket), CLI, verificador y métricas.
+- [`enclave/`](enclave) — Empaquetado experimental con Gramine 1.9 (`direct` / `sgx`) para el servicio `enclave_server`.
 - [`chain/`](chain) — Contrato `AnchorRegistry.sol`, compilación, despliegue, anclaje periódico y verificador on-chain.
 - [`observability/`](observability) — Configuración de Prometheus, alertas y dashboard de Grafana.
 - [`infrastructure/proxmox/`](infrastructure/proxmox) y [`ansible/`](ansible) — Base para crear y configurar 3 contenedores LXC en Proxmox.

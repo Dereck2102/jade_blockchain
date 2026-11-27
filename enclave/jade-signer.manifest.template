@@ -1,0 +1,59 @@
+# Plantilla de manifiesto Gramine 1.9+ para el servicio firmador de JaDe Blockchain.
+# Perfil experimental:
+#   - Modo direct (sin hardware SGX): gramine-direct ./python3 -m jadeblock.enclave_server
+#   - Modo SGX (requiere Intel Xeon con SGX + FLC y /dev/sgx_enclave): gramine-sgx ./python3 -m jadeblock.enclave_server
+
+loader.entrypoint = "file:{{ gramine.libos }}"
+libos.entrypoint = "{{ entrypoint }}"
+
+loader.log_level = "{{ log_level }}"
+
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/{{ arch_libdir }}"
+loader.env.HOME = "/signer"
+loader.env.PYTHONDONTWRITEBYTECODE = "1"
+loader.env.PYTHONUTF8 = "1"
+loader.env.JADE_SIGNER_DIR = "/signer"
+loader.env.JADE_SIGNER_HOST = { passthrough = true }
+loader.env.JADE_SIGNER_PORT = { passthrough = true }
+
+loader.argv = ["python3", "-m", "jadeblock.enclave_server"]
+
+sys.enable_sigterm_injection = true
+sys.enable_extra_runtime_domain_names_conf = false
+
+fs.mounts = [
+  { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+  { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
+  { path = "/usr/{{ arch_libdir }}", uri = "file:/usr/{{ arch_libdir }}" },
+  { path = "{{ entrypoint }}", uri = "file:{{ entrypoint }}" },
+  { path = "/usr/lib/python3", uri = "file:/usr/lib/python3" },
+  { path = "/usr/lib/python3.12", uri = "file:/usr/lib/python3.12" },
+  { path = "/usr/local/lib/python3.12", uri = "file:/usr/local/lib/python3.12" },
+  { path = "/etc/nsswitch.conf", uri = "file:/etc/nsswitch.conf" },
+  { path = "/etc/hosts", uri = "file:/etc/hosts" },
+  # En modo SGX real, encrypted cifra y autentica ed25519.key y signer-state.json
+  # ligados a la identidad MRENCLAVE del enclave (_sgx_mrenclave).
+  { type = "{{ signer_fs_type }}", path = "/signer", uri = "file:/signer", key_name = "_sgx_mrenclave" },
+]
+
+sgx.debug = false
+sgx.edmm_enable = false
+sgx.enclave_size = "512M"
+sgx.max_threads = 16
+sgx.remote_attestation = "{{ remote_attestation }}"
+
+sgx.trusted_files = [
+  "file:{{ gramine.libos }}",
+  "file:{{ entrypoint }}",
+  "file:{{ gramine.runtimedir() }}/",
+  "file:{{ arch_libdir }}/",
+  "file:/usr/{{ arch_libdir }}/",
+  "file:/usr/lib/python3/",
+  "file:/usr/lib/python3.12/",
+  "file:/usr/local/lib/python3.12/",
+]
+
+sgx.allowed_files = [
+  "file:/etc/nsswitch.conf",
+  "file:/etc/hosts",
+]

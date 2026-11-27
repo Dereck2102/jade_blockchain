@@ -3,7 +3,8 @@
 ## Implementado en el repositorio
 
 - Evento v1 y vector determinista Unicode/campos opcionales.
-- Ledger JSONL, firma Ed25519, contador persistente y retry idempotente.
+- Ledger JSONL, firma Ed25519, contador persistente, retry idempotente y abstracción `SignerBackend` (archivo local, callback HSM/TPM y microservicio IPC `enclave_server`).
+- Empaquetado experimental Gramine 1.9 (`enclave/`, modos `direct` y `sgx` con fallo cerrado si falta `/dev/sgx_enclave`).
 - Verificador estricto con resultados JSON, exit codes diferenciados y cobertura por checkpoint de prefijo.
 - Demo Compose con Besu QBFT de un validador, contrato Solidity, compilación y anclador del último evento (con modo periódico opcional `ANCHOR_INTERVAL_SECONDS`).
 - Matriz automatizada de seis ataques sobre registros (`MITRE ATT&CK TA0005`).
@@ -13,7 +14,7 @@
 
 ## Validado localmente en esta revisión
 
-- 38 pruebas Python: vectores Unicode, JSON estricto RFC 8259, matriz de 6 ataques (`MITRE ATT&CK TA0005`), concurrencia/poda del firmador, manifiesto aislado de salud, métricas ante vaciado de log, endpoints HTTP y escáner de higiene.
+- 41 pruebas Python (también verificadas con `-X utf8=0` / `cp1252` de Windows Python 3.12): vectores Unicode, JSON estricto RFC 8259, matriz de 6 ataques (`MITRE ATT&CK TA0005`), backends de firma e IPC de enclave, concurrencia/poda del firmador, manifiesto aislado de salud, métricas ante vaciado de log, endpoints HTTP y escáner de higiene.
 - Test y compilación Solidity; `npm audit` informó cero vulnerabilidades.
 - `docker compose config --quiet`, `promtool check config` (cinco reglas) y parseo del dashboard Grafana.
 - Recorrido Docker real local: Besu QBFT inició, el contrato se desplegó, una solicitud repetida generó el mismo único evento, el anclador publicó el contador 1 y el verificador devolvió `verified`, con integridad, autenticidad y cobertura completas.

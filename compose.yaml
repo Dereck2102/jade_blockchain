@@ -1,4 +1,19 @@
 services:
+  volume-init:
+    build: .
+    user: "0:0"
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /data /signer
+        chmod 0755 /data
+        chmod 0700 /signer
+        chown -R 1000:1000 /data /signer
+    volumes:
+      - jade-data:/data
+      - signer-data:/signer
+    restart: "no"
   chain-keygen:
     image: hyperledger/besu:26.11.2
     user: "0:0"
@@ -76,6 +91,25 @@ services:
       - "127.0.0.1:${METRICS_PORT:-9108}:9108"
     volumes:
       - jade-data:/data:ro
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  enclave-signer:
+    build:
+      context: .
+      dockerfile: enclave/Dockerfile
+    profiles: ["enclave"]
+    environment:
+      JADE_ENCLAVE_MODE: ${JADE_ENCLAVE_MODE:-direct}
+      JADE_SIGNER_DIR: /signer
+      JADE_SIGNER_HOST: 0.0.0.0
+      JADE_SIGNER_PORT: 9201
+    volumes:
+      - signer-data:/signer
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
     restart: unless-stopped
   demo:
     build: .
@@ -93,6 +127,9 @@ services:
     volumes:
       - jade-data:/data
       - signer-data:/data/signer
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
   anchor:
     build:
       context: ./chain
