@@ -13,7 +13,7 @@
 
 ## Validado localmente en esta revisión
 
-- 22 pruebas Python: vectores Unicode, alteración, firma inválida/ausente, evidencia vacía, cobertura de anclaje ausente/parcial, regresiones, reintentos tras reinicio, solicitudes firmadas pendientes y sonda de capacidad de firma.
+- 38 pruebas Python: vectores Unicode, JSON estricto RFC 8259, matriz de 6 ataques (`MITRE ATT&CK TA0005`), concurrencia/poda del firmador, manifiesto aislado de salud, métricas ante vaciado de log, endpoints HTTP y escáner de higiene.
 - Test y compilación Solidity; `npm audit` informó cero vulnerabilidades.
 - `docker compose config --quiet`, `promtool check config` (cinco reglas) y parseo del dashboard Grafana.
 - Recorrido Docker real local: Besu QBFT inició, el contrato se desplegó, una solicitud repetida generó el mismo único evento, el anclador publicó el contador 1 y el verificador devolvió `verified`, con integridad, autenticidad y cobertura completas.

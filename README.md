@@ -31,7 +31,7 @@ En arquitecturas efímeras (funciones serverless y contenedores de corta duraci�
 - [`observability/`](observability) — Configuración de Prometheus, alertas y dashboard de Grafana.
 - [`infrastructure/proxmox/`](infrastructure/proxmox) y [`ansible/`](ansible) — Base para crear y configurar 3 contenedores LXC en Proxmox.
 - [`tests/`](tests) — Pruebas unitarias, sonda del firmador y matriz automatizada de 6 ataques (`MITRE ATT&CK TA0005`).
-- [`docs/`](docs) — [Arquitectura](docs/ARCHITECTURE.md), [modelo de amenazas](docs/THREAT_MODEL.md), [operación](docs/OPERATIONS.md), [restauración](docs/RESTORE.md), [decisiones](docs/DECISIONS.md) y [hoja de ruta](docs/ROADMAP.md).
+- [`docs/`](docs) — [Arquitectura](docs/ARCHITECTURE.md), [modelo de amenazas](docs/THREAT_MODEL.md), [trazabilidad NIST/ISO/SOLID](docs/STANDARDS_MAPPING.md), [operación](docs/OPERATIONS.md), [restauración](docs/RESTORE.md), [decisiones](docs/DECISIONS.md) y [hoja de ruta](docs/ROADMAP.md).
 
 ## ¿Cómo probarlo?
 
