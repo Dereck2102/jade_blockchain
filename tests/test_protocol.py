@@ -468,6 +468,94 @@ class SignerPersistenceTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertEqual(json.loads(lines[0])["firma_n"], 1)
 
+        # Pinning de clave pública rechaza un endpoint que cambie de identidad.
+        rogue_key = Ed25519PrivateKey.generate()
+        client_pinned = EnclaveSignerClient(pinned_public_key=rogue_key.public_key())
+        with patch.object(EnclaveSignerClient, "_request", fake_request):
+            with self.assertRaisesRegex(RuntimeError, "no coincide con la clave fijada"):
+                client_pinned.public_key()
+
+    def test_serverless_lifecycle_simulation_and_schema_version_alignment(self):
+        import tomllib
+        from jadeblock import __version__
+        from jadeblock.cli import main
+        from jadeblock.verify import read_events, verify_files
+
+        events_path = Path(self.temporary.name) / "sim-events.jsonl"
+        state_dir = Path(self.temporary.name) / "sim-signer"
+        pub_path = Path(self.temporary.name) / "sim-pub.b64"
+
+        rc = main(
+            [
+                "simulate",
+                "--events",
+                str(events_path),
+                "--state-dir",
+                str(state_dir),
+                "--public-key",
+                str(pub_path),
+                "--node",
+                "nodo-efimero",
+                "--function",
+                "autenticar",
+                "--invocation-id",
+                "407813",
+                "--fail",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        # Reintento idempotente con el mismo invocation-id no duplica los 5 eventos.
+        rc_retry = main(
+            [
+                "simulate",
+                "--events",
+                str(events_path),
+                "--state-dir",
+                str(state_dir),
+                "--public-key",
+                str(pub_path),
+                "--node",
+                "nodo-efimero",
+                "--function",
+                "autenticar",
+                "--invocation-id",
+                "407813",
+                "--fail",
+            ]
+        )
+        self.assertEqual(rc_retry, 0)
+        events = read_events(events_path)
+        self.assertEqual(len(events), 5)
+        self.assertEqual(
+            [e["tipo"] for e in events],
+            [
+                "contenedor_create",
+                "contenedor_start",
+                "funcion_log",
+                "contenedor_die",
+                "contenedor_destroy",
+            ],
+        )
+        self.assertEqual(events[3]["datos"]["codigo_salida"], 1)
+        report = verify_files(events_path, pub_path, None)
+        self.assertTrue(report["integrity"]["ok"])
+        self.assertTrue(report["authenticity"]["ok"])
+
+        repo_root = Path(__file__).resolve().parents[1]
+        event_schema = json.loads((repo_root / "schemas" / "event-v1.schema.json").read_text(encoding="utf-8"))
+        report_schema = json.loads(
+            (repo_root / "schemas" / "verification-report-v1.schema.json").read_text(encoding="utf-8")
+        )
+        for req in event_schema["required"]:
+            self.assertIn(req, events[0])
+        for req in report_schema["required"]:
+            self.assertIn(req, report)
+
+        pyproject_ver = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+        pkg_json_ver = json.loads((repo_root / "chain" / "package.json").read_text(encoding="utf-8"))["version"]
+        self.assertEqual(__version__, pyproject_ver)
+        self.assertEqual(__version__, pkg_json_ver)
+
 
 if __name__ == "__main__":
     unittest.main()

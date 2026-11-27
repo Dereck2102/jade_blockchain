@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dereck2102/jade_blockchain/blob/main/schemas/verification-report-v1.schema.json",
+  "title": "JaDe Blockchain Verification Report v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "integrity",
+    "authenticity",
+    "anchor_coverage",
+    "event_count",
+    "failures"
+  ],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "status": {
+      "type": "string",
+      "enum": ["verified", "incomplete", "invalid"]
+    },
+    "integrity": {
+      "type": "object",
+      "required": ["checked", "ok"],
+      "properties": {
+        "checked": { "type": "boolean" },
+        "ok": { "type": "boolean" }
+      }
+    },
+    "authenticity": {
+      "type": "object",
+      "required": ["checked", "ok"],
+      "properties": {
+        "checked": { "type": "boolean" },
+        "ok": { "type": "boolean" }
+      }
+    },
+    "anchor_coverage": {
+      "type": "object",
+      "required": [
+        "checked",
+        "status",
+        "anchored_prefix_by_node",
+        "pending_events_by_node"
+      ],
+      "properties": {
+        "checked": { "type": "boolean" },
+        "status": {
+          "type": "string",
+          "enum": ["not_checked", "local_only", "partial", "complete", "invalid"]
+        },
+        "anchored_prefix_by_node": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "pending_events_by_node": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 1 }
+        },
+        "contract_source_verified": { "type": "boolean" }
+      }
+    },
+    "event_count": { "type": "integer", "minimum": 0 },
+    "failures": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "ledger_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "additionalProperties": false
+}
