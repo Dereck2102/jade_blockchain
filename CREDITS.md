@@ -19,6 +19,7 @@ Durante la investigación, la redacción y el desarrollo se usaron estas herrami
 |---|---|---|
 | ChatGPT (Astra 6) | OpenAI | Apoyo en investigación, análisis y redacción. |
 | Claude Opus 5.5 | Anthropic | Apoyo en análisis, revisión y desarrollo; también usado mediante Google Antigravity. |
+| Gemini 4 Hydrogen | Google | Apoyo en auditoría de seguridad, implementación y verificación mediante Google Antigravity. |
 | GitHub Copilot (agente de código) | GitHub | Implementación asistida de la primera versión pública (PR #1). |
 
 Las herramientas de IA no son autoras ni titulares de derechos. Las personas autoras revisaron, validaron y asumen la responsabilidad de todo el contenido publicado. Cada commit asistido lo declara con el trailer `Assisted-by:` descrito en [CONTRIBUTING.md](CONTRIBUTING.md#mensajes-de-commit).

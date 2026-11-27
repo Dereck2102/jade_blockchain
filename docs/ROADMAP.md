@@ -4,8 +4,10 @@
 
 - Evento v1 y vector determinista Unicode/campos opcionales.
 - Ledger JSONL, firma Ed25519, contador persistente y retry idempotente.
-- Verificador estricto con resultados JSON y exit codes diferenciados.
-- Demo Compose con Besu QBFT de un validador, contrato Solidity, compilación y anclador.
+- Verificador estricto con resultados JSON, exit codes diferenciados y cobertura por checkpoint de prefijo.
+- Demo Compose con Besu QBFT de un validador, contrato Solidity, compilación y anclador del último evento (con modo periódico opcional `ANCHOR_INTERVAL_SECONDS`).
+- Matriz automatizada de seis ataques sobre registros (`MITRE ATT&CK TA0005`).
+- Verificación automática de higiene del repositorio (secretos y datos locales) en CI.
 - Métricas locales, reglas Prometheus y dashboard de ejemplo por nodo.
 - Módulo inicial de creación LXC y rol Ansible para Debian/systemd.
 

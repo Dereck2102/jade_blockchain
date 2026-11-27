@@ -9,10 +9,18 @@ El formato sigue [Keep a Changelog 1.1.0](https://keepachangelog.com/es-ES/1.1.0
 ### Añadido
 
 - `CITATION.cff` con la autoría conjunta de Jacqueline Andrango y Dereck Amacoria y la referencia al trabajo de fin de carrera.
-- Créditos de las herramientas de IA usadas (ChatGPT Astra 6, Claude Opus 5.5, GitHub Copilot) en `CREDITS.md`.
+- Créditos de las herramientas de IA usadas (ChatGPT Astra 6, Claude Opus 5.5, Gemini 4 Hydrogen, GitHub Copilot) en `CREDITS.md`.
 - Convención de commits (Conventional Commits 1.0.0), política de atribución `Co-authored-by`/`Assisted-by` y plantilla `.gitmessage`.
 - Plantilla de pull request.
 - Job de CI que ejecuta las pruebas Python en Ubuntu y Windows.
+- Matriz automatizada de los seis ataques sobre registros (`MITRE ATT&CK TA0005`) en `tests/test_attack_matrix.py`.
+- Verificación automática de higiene del repositorio (`scripts/check_repo_hygiene.py`) en CI para bloquear secretos o datos de máquina.
+
+### Cambiado
+
+- El anclador (`chain/anchor.mjs`) y los verificadores (`jadeblock/verify.py`, `chain/verify.mjs`) ahora operan con anclaje de prefijo mediante checkpoint del último evento firmado (y modo periódico opcional con `ANCHOR_INTERVAL_SECONDS`), rechazando prefijos rotos, duplicados y regresiones.
+- `README.md` reescrito como guía exploratoria concisa.
+- Titular de `LICENSE` actualizado a Dereck Amacoria y Jacqueline Andrango.
 
 ### Corregido
 
@@ -30,3 +38,4 @@ El formato sigue [Keep a Changelog 1.1.0](https://keepachangelog.com/es-ES/1.1.0
 
 [Sin publicar]: https://github.com/Dereck2102/jade_blockchain/compare/cf2a0bd...HEAD
 [0.1.0]: https://github.com/Dereck2102/jade_blockchain/commit/cf2a0bd
+
