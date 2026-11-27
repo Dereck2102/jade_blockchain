@@ -1,0 +1,17 @@
+{
+  "name": "jade-blockchain-chain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compile": "node compile.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ethers": "6.17.0",
+    "solc": "0.8.39"
+  },
+  "overrides": {
+    "tmp": "0.2.7"
+  }
+}

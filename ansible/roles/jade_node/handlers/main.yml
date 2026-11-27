@@ -1,0 +1,4 @@
+- name: Reiniciar exportador JaDe
+  ansible.builtin.systemd_service:
+    name: jade-metrics.service
+    state: restarted

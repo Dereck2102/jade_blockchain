@@ -1,0 +1,10 @@
+proxmox_endpoint = "https://proxmox.example.invalid:8006/"
+proxmox_api_token = "REPLACE_WITH_A_TOKEN_FROM_YOUR_SECRET_STORE"
+proxmox_node = "REPLACE_WITH_AUTHORIZED_NODE_NAME"
+container_ids = [9201, 9202, 9203]
+template_file_id = "local:vztmpl/debian-12-standard_TEMPLATE.tar.zst"
+storage_id = "REPLACE_WITH_AUTHORIZED_STORAGE_ID"
+bridge = "REPLACE_WITH_AUTHORIZED_EXISTING_BRIDGE"
+ipv4_addresses = ["192.0.2.21/24", "192.0.2.22/24", "192.0.2.23/24"]
+ipv4_gateway = "192.0.2.1"
+ssh_public_keys = ["ssh-ed25519 REPLACE_WITH_YOUR_PUBLIC_KEY example"]

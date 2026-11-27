@@ -1,0 +1,13 @@
+.git
+.env
+.venv
+__pycache__
+*.py[cod]
+node_modules
+chain/node_modules
+data
+*.tfstate*
+*.tfplan
+backups
+logs
+tests

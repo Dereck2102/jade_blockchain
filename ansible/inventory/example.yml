@@ -1,0 +1,15 @@
+all:
+  children:
+    monitor:
+      hosts:
+        jade-monitor:
+          ansible_host: 192.0.2.21
+          ansible_user: jadeadmin
+    nodes:
+      hosts:
+        jade-node-1:
+          ansible_host: 192.0.2.22
+          ansible_user: jadeadmin
+        jade-node-2:
+          ansible_host: 192.0.2.23
+          ansible_user: jadeadmin
