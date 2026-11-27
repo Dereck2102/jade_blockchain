@@ -8,10 +8,17 @@ import sys
 FORBIDDEN_PATH_PATTERNS = (
     re.compile(r"(^|/)\.env(\..+)?$", re.IGNORECASE),
     re.compile(r"\.(key|pem|p12|pfx|jks|kdbx|tfstate|tfstate\..*|tfplan)$", re.IGNORECASE),
+    re.compile(r"\.(docx?|pdf|zip)$", re.IGNORECASE),
     re.compile(r"(^|/)terraform\.tfvars$", re.IGNORECASE),
     re.compile(r"(^|/)ansible/inventory/generated", re.IGNORECASE),
     re.compile(r"(^|/)(events\.jsonl|signer-state\.json|anchors\.json|contract\.json)$", re.IGNORECASE),
-    re.compile(r"(^|/)backups/", re.IGNORECASE),
+    re.compile(r"(^|/)(backups|contexto)/", re.IGNORECASE),
+    re.compile(
+        r"(contexto|inventario_y_plan|ingenieria_inversa|manifiesto_codigo|"
+        r"bloques_replicacion|pruebas_locales_verificadores|lector_inventario|"
+        r"acceso_inventario|lectura_codigo|lectura_configuracion)",
+        re.IGNORECASE,
+    ),
 )
 ALLOWED_PATH_EXCEPTIONS = {
     ".env.example",
@@ -96,6 +103,7 @@ def scan_paths(paths: list[str], root: Path = Path(".")) -> list[str]:
             for pattern in FORBIDDEN_PATH_PATTERNS:
                 if pattern.search(normalized):
                     findings.append(f"{normalized}: archivo sensible no permitido")
+                    break
         if normalized in SKIP_CONTENT_FILES:
             continue
         file_path = root / normalized
@@ -111,13 +119,24 @@ def scan_paths(paths: list[str], root: Path = Path(".")) -> list[str]:
     return findings
 
 
+def _write_utf8(stream, text: str) -> None:
+    payload = text + "\n"
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        buffer.write(payload.encode("utf-8"))
+        buffer.flush()
+        return
+    stream.write(payload.encode("ascii", errors="backslashreplace").decode("ascii"))
+    stream.flush()
+
+
 def main() -> int:
     findings = scan_paths(tracked_and_unignored_files())
     if findings:
         for item in findings:
-            print(item, file=sys.stderr)
+            _write_utf8(sys.stderr, item)
         return 1
-    print("Higiene del repositorio verificada sin hallazgos.")
+    _write_utf8(sys.stdout, "Higiene del repositorio verificada sin hallazgos.")
     return 0
 
 

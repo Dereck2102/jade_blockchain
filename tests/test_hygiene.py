@@ -28,6 +28,25 @@ class RepoHygieneTests(unittest.TestCase):
             findings = self.hygiene.scan_paths([".ENV.PROD", "SECRET.KEY", "events.jsonl"], root=root)
             self.assertEqual(len(findings), 3)
 
+    def test_blocks_context_and_document_archives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            blocked = [
+                "Contexto.zip",
+                "Tesis_Final.docx",
+                "borrador.pdf",
+                "contexto/notas.txt",
+                "Ingenieria_inversa_codigo_y_replicacion.txt",
+                "Inventario_y_plan_de_replicacion.txt",
+                "Manifiesto_codigo_observado.json",
+            ]
+            for rel in blocked:
+                target = root / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("x\n", encoding="utf-8")
+            findings = self.hygiene.scan_paths(blocked, root=root)
+            self.assertEqual(len(findings), len(blocked))
+
     def test_scans_allowed_example_files_for_leaked_content_and_utf16(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -53,3 +72,4 @@ class RepoHygieneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
