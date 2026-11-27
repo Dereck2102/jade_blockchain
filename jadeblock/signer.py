@@ -9,19 +9,18 @@ from pathlib import Path
 import tempfile
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from .backends import FileEd25519Backend, SignerBackend
 from .protocol import (
+    HEX_64_RE,
     MAX_SAFE_COUNTER,
+    event_body,
     event_hash,
     public_key_bytes,
-    sign_event,
     strict_json_dumps,
     strict_json_loads,
+    validate_body,
 )
 
 MAX_RETAINED_CONFIRMED_REQUESTS = 256
@@ -132,7 +131,7 @@ def verify_signer_status_file(status_path: Path, trusted_key: Ed25519PublicKey |
 
 
 class EventSigner:
-    def __init__(self, state_dir: Path):
+    def __init__(self, state_dir: Path, backend: SignerBackend | None = None):
         self.state_dir = Path(state_dir)
         self.key_path = self.state_dir / "ed25519.key"
         self.state_path = self.state_dir / "signer-state.json"
@@ -140,34 +139,22 @@ class EventSigner:
         self.lock_path = self.state_dir / ".signer.lock"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         with file_lock(self.lock_path):
-            if not self.key_path.exists() and self.state_path.exists():
-                raise RuntimeError(
-                    f"Falta la clave del firmador; no se genera otra para el estado existente: {self.key_path}"
-                )
-            self._new_key_created = not self.key_path.exists()
-            self.private_key = self._load_or_create_key()
-
-    def _load_or_create_key(self) -> Ed25519PrivateKey:
-        try:
-            raw = base64.b64decode(self.key_path.read_bytes(), validate=True)
-        except FileNotFoundError:
-            key = Ed25519PrivateKey.generate()
-            raw = key.private_bytes(
-                encoding=serialization.Encoding.Raw,
-                format=serialization.PrivateFormat.Raw,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-            fd = os.open(self.key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(base64.b64encode(raw))
-                stream.flush()
-                os.fsync(stream.fileno())
-            _fsync_directory(self.state_dir)
-            return key
-        return Ed25519PrivateKey.from_private_bytes(raw)
+            if backend is None:
+                if not self.key_path.exists() and self.state_path.exists():
+                    raise RuntimeError(
+                        f"Falta la clave del firmador; no se genera otra para el estado existente: {self.key_path}"
+                    )
+                self._new_key_created = not self.key_path.exists()
+                self.backend: SignerBackend = FileEd25519Backend(self.key_path, _fsync_directory)
+            else:
+                self._new_key_created = not self.state_path.exists()
+                self.backend = backend
 
     def public_key(self) -> Ed25519PublicKey:
-        return self.private_key.public_key()
+        return self.backend.public_key()
+
+    def sign_challenge(self, challenge: bytes) -> bytes:
+        return self.backend.sign_message(challenge)
 
     def counter(self) -> int:
         return self._load_state()["counter"]
@@ -175,7 +162,7 @@ class EventSigner:
     def build_status_manifest(self, counter: int | None = None) -> dict:
         current = self.counter() if counter is None else counter
         pub_b64 = base64.b64encode(public_key_bytes(self.public_key())).decode("ascii")
-        sig = self.private_key.sign(_status_payload(current, pub_b64))
+        sig = self.backend.sign_message(_status_payload(current, pub_b64))
         return {
             "counter": current,
             "public_key": pub_b64,
@@ -271,7 +258,14 @@ class EventSigner:
                     raise ValueError("request_id ya utilizado con otro contenido")
                 return previous["event"]
             next_counter = state["counter"] + 1
-            event = sign_event(body, next_counter, self.private_key)
+            validate_body(body)
+            signature = self.backend.sign_message(f"{next_counter}|{request_digest}".encode("utf-8"))
+            event = {
+                **event_body(body),
+                "hash": request_digest,
+                "firma": base64.b64encode(signature).decode("ascii"),
+                "firma_n": next_counter,
+            }
             state["counter"] = next_counter
             state["requests"][request_id] = {"input_hash": request_digest, "event": event}
             _atomic_json(self.state_path, state)

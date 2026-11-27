@@ -105,9 +105,13 @@ class AttackMatrixTests(unittest.TestCase):
         self.assertEqual(with_anchors["status"], "invalid")
 
     def test_attack_6_rollback_signer_counter_t1565_caught_by_signer_and_anchors(self):
+        from jadeblock.backends import CallbackSignerBackend
+
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "signer"
-            signer = EventSigner(state_dir)
+            raw_key = Ed25519PrivateKey.generate()
+            backend = CallbackSignerBackend(raw_key.public_key(), raw_key.sign)
+            signer = EventSigner(state_dir, backend=backend)
             first = signer.sign(
                 {
                     "fecha": "2026-11-05T10:00:01Z",
@@ -132,10 +136,23 @@ class AttackMatrixTests(unittest.TestCase):
             )
             anchors = [{"nodo": "nodo-prueba", "firma_n": 2, "hash": second["hash"]}]
 
-            # Si se elimina el estado para intentar reiniciar el contador, el firmador se detiene.
-            (state_dir / "signer-state.json").unlink()
+            # Si existe clave en disco y se borra signer-state.json, el firmador por archivo se detiene.
+            file_state_dir = Path(tmp) / "file-signer"
+            file_signer = EventSigner(file_state_dir)
+            file_signer.sign(
+                {
+                    "fecha": "2026-11-05T10:00:01Z",
+                    "nodo": "nodo-prueba",
+                    "origen": "archivos",
+                    "tipo": "creado",
+                    "nivel": "info",
+                    "hash_anterior": ZERO_HASH,
+                },
+                "req-f1",
+            )
+            (file_state_dir / "signer-state.json").unlink()
             with self.assertRaises(RuntimeError):
-                EventSigner(state_dir).sign(
+                EventSigner(file_state_dir).sign(
                     {
                         "fecha": "2026-11-05T10:00:03Z",
                         "nodo": "nodo-prueba",
@@ -159,7 +176,7 @@ class AttackMatrixTests(unittest.TestCase):
                         "hash_anterior": ZERO_HASH,
                     },
                     1,
-                    signer.private_key,
+                    raw_key,
                 )
             ]
             result = verify_evidence(replayed_from_snapshot, signer.public_key(), anchors)

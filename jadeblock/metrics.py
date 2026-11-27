@@ -61,7 +61,7 @@ def _signer_ready(state_dir: Path, trusted_key, status_path: Path | None = None)
         ):
             return False
         challenge = b"jade-blockchain-signer-health-check"
-        trusted_key.verify(signer.private_key.sign(challenge), challenge)
+        trusted_key.verify(signer.sign_challenge(challenge), challenge)
         return True
     except (OSError, ValueError, TypeError, RuntimeError, InvalidSignature):
         return False
