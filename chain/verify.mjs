@@ -1,33 +1,32 @@
 import fs from "node:fs";
-import crypto from "node:crypto";
-import solc from "solc";
+import { Contract } from "ethers";
 import {
-  Contract,
-  JsonRpcProvider,
-  keccak256,
-} from "ethers";
+  ZeroAddress,
+  compileRegistry,
+  createRpcProvider,
+  fetchVerifierSnapshot,
+  parseVerifiedLedger,
+  signatureDigestHex,
+  toSafeCounter,
+  validateLocalAnchors,
+  verifyDeployedContract,
+} from "./lib.mjs";
 
 const dataDir = process.env.JADE_DATA ?? "/data";
 const chainDir = process.env.CHAIN_DATA ?? "/chain";
 const nodeName = process.env.JADE_NODE ?? "demo-node";
-const contractSource = fs.readFileSync(new URL("./AnchorRegistry.sol", import.meta.url), "utf8");
-const input = {
-  language: "Solidity",
-  sources: { "AnchorRegistry.sol": { content: contractSource } },
-  settings: {
-    optimizer: { enabled: true, runs: 200 },
-    evmVersion: "london",
-    outputSelection: {
-      "*": { "*": ["abi", "evm.bytecode.object", "evm.deployedBytecode.object"] },
-    },
-  },
-};
-const compilerOutput = JSON.parse(solc.compile(JSON.stringify(input)));
-const compilerErrors = (compilerOutput.errors ?? []).filter(({ severity }) => severity === "error");
-const compiled = compilerOutput.contracts?.["AnchorRegistry.sol"]?.AnchorRegistry;
+
+let compiled = null;
+let compileFailure = null;
+try {
+  compiled = compileRegistry();
+} catch (error) {
+  compileFailure = error;
+}
+
 let local;
 try {
-  const response = await fetch(process.env.VERIFIER_URL ?? "http://metrics:9108/verify");
+  const response = await fetchVerifierSnapshot(process.env.VERIFIER_URL ?? "http://metrics:9108/verify");
   local = await response.json();
   if (!response.ok) throw new Error(local.error ?? "La verificación local falló");
 } catch (error) {
@@ -70,7 +69,7 @@ if (local.status === "invalid" || !output.integrity.ok || !output.authenticity.o
   console.log(JSON.stringify(output, null, 2));
   process.exit(1);
 }
-if (compilerErrors.length || !compiled) {
+if (compileFailure || !compiled) {
   output.failures.push("No se pudo compilar el fuente del contrato");
   output.anchor_coverage.status = "invalid";
   output.status = "invalid";
@@ -80,55 +79,48 @@ if (compilerErrors.length || !compiled) {
 
 try {
   const ledger = fs.readFileSync(`${dataDir}/events.jsonl`);
-  const digest = crypto.createHash("sha256").update(ledger).digest("hex");
-  if (digest !== local.ledger_sha256) {
-    throw new Error("El ledger cambió después de la verificación local");
-  }
-  const events = ledger.toString("utf8").split(/\r?\n/).filter(Boolean)
-    .map((line) => JSON.parse(line));
+  const events = parseVerifiedLedger(ledger, local.ledger_sha256, local.event_count);
   const anchorsPath = `${dataDir}/anchors.json`;
-  const localAnchors = fs.existsSync(anchorsPath)
-    ? JSON.parse(fs.readFileSync(anchorsPath, "utf8"))
-    : [];
-  if (!Array.isArray(localAnchors)) throw new Error("Estado local de anclas mal formado");
+  const localAnchors = validateLocalAnchors(
+    fs.existsSync(anchorsPath) ? JSON.parse(fs.readFileSync(anchorsPath, "utf8")) : []
+  );
   const deployment = JSON.parse(fs.readFileSync(`${chainDir}/contract.json`, "utf8"));
-  const expectedSource = crypto.createHash("sha256").update(contractSource).digest("hex");
-  const expectedRuntime = keccak256(`0x${compiled.evm.deployedBytecode.object}`);
-  const provider = new JsonRpcProvider(process.env.BESU_RPC_URL ?? "http://besu:8545");
-  const chain = await provider.getNetwork();
-  if (chain.chainId !== 1337n) throw new Error(`Chain ID inesperado: ${chain.chainId}`);
-  const code = await provider.getCode(deployment.address);
-  if (
-    code === "0x"
-    || keccak256(code) !== expectedRuntime
-    || deployment.runtime_keccak256 !== expectedRuntime
-    || deployment.source_sha256 !== expectedSource
-  ) {
-    throw new Error("Fuente o bytecode desplegado no coincide con la compilación");
-  }
+  const provider = createRpcProvider(process.env.BESU_RPC_URL ?? "http://besu:8545");
+  await verifyDeployedContract(provider, deployment, compiled);
+
   const registry = new Contract(deployment.address, compiled.abi, provider);
   if (
-    (await registry.authorizedEmitter(nodeName)).toLowerCase()
-    !== deployment.emitter.toLowerCase()
+    typeof deployment.emitter !== "string"
+    || (await registry.authorizedEmitter(nodeName)).toLowerCase() !== deployment.emitter.toLowerCase()
   ) {
     throw new Error("El emisor autorizado no coincide con la identidad registrada");
   }
   output.anchor_coverage.contract_source_verified = true;
+
   const nodes = [...new Set([
     ...events.map((event) => event.nodo),
     ...localAnchors.map((anchor) => anchor.nodo),
   ])].sort();
+
   let anyRemoteAnchor = false;
   let invalidAnchor = false;
   for (const node of nodes) {
+    const emitter = await registry.authorizedEmitter(node);
+    if (!emitter || emitter === ZeroAddress) {
+      throw new Error(`El nodo ${node} no tiene emisor autorizado en el contrato`);
+    }
+    if (node === deployment.node && emitter.toLowerCase() !== deployment.emitter.toLowerCase()) {
+      throw new Error(`El emisor autorizado de ${node} difiere del registrado en el despliegue`);
+    }
+
     const nodeEvents = events.filter((event) => event.nodo === node);
     const nodeLocal = localAnchors.filter((anchor) => anchor.nodo === node);
     const orderedLocalCounters = nodeLocal.map((anchor) => anchor.firma_n).sort((a, b) => a - b);
-    if (orderedLocalCounters.some((counter, index) => !Number.isSafeInteger(counter) || counter < 1 || (index > 0 && counter <= orderedLocalCounters[index - 1]))) {
-      throw new Error(`Duplicado, valor inválido o regresión local de ancla para ${node}`);
+    if (orderedLocalCounters.some((counter, index) => index > 0 && counter <= orderedLocalCounters[index - 1])) {
+      throw new Error(`Duplicado o regresión local de ancla para ${node}`);
     }
     const localCounter = orderedLocalCounters.at(-1) ?? 0;
-    const remoteCounter = Number(await registry.lastCounter(node));
+    const remoteCounter = toSafeCounter(await registry.lastCounter(node), "lastCounter");
     if (remoteCounter < localCounter) {
       throw new Error(`Regresión remota para ${node}: cadena=${remoteCounter}, local=${localCounter}`);
     }
@@ -137,6 +129,7 @@ try {
       throw new Error(`Anclas remotas sin eventos locales para ${node}`);
     }
     if (remoteCounter > 0) anyRemoteAnchor = true;
+
     const checkpointsToVerify = [...new Set([
       ...orderedLocalCounters,
       ...(remoteCounter > 0 ? [remoteCounter] : []),
@@ -146,10 +139,11 @@ try {
       if (!event) throw new Error(`Falta evento local ${node}/${counter}`);
       const remoteEventHash = await registry.eventHashAt(node, counter);
       const remoteSignatureHash = await registry.signatureHashAt(node, counter);
-      const signatureHash = `0x${crypto.createHash("sha256")
-        .update(Buffer.from(event.firma, "base64"))
-        .digest("hex")}`;
-      const timestamp = Number(await registry.anchorTimestampAt(node, counter));
+      const signatureHash = signatureDigestHex(event.firma);
+      const timestamp = toSafeCounter(
+        await registry.anchorTimestampAt(node, counter),
+        "anchorTimestampAt"
+      );
       const localAnchor = nodeLocal.find((anchor) => anchor.firma_n === counter);
       if (
         remoteEventHash.toLowerCase() !== `0x${event.hash}`.toLowerCase()
