@@ -7,7 +7,7 @@
 | Persona | Rol |
 |---|---|
 | Jacqueline Patricia Andrango Mafla | Coautora del proyecto original: concepción, investigación, diseño del prototipo de laboratorio y documentación. |
-| Dereck Stevens Amacoria Chávez | Coautor del proyecto original; mantenedor actual de esta base pública. |
+| Dereck Stevens Amacoria Chávez | Coautor del proyecto original: concepción, investigación, diseño del prototipo de laboratorio, documentación y soporte actual de esta base pública. |
 
 El proyecto original es el trabajo de fin de carrera *«Desarrollo de un prototipo de sistema de inspección continua para entornos serverless mediante enclaves seguros y tecnología blockchain, para garantizar la integridad de evidencia digital en instituciones públicas de Quito, año 2026»*, Tecnología Superior en Ciberseguridad, Instituto Superior Tecnológico San Antonio (TESA), Quito, 2026, con la tutoría del Mgtr. José Antonio Cruz Tobar. Para citar el software, consulta [CITATION.cff](CITATION.cff).
 
