@@ -3,6 +3,11 @@ name: CI
 on:
   pull_request:
   push:
+    branches: [main, Dev]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -48,8 +53,11 @@ jobs:
           npm audit --prefix chain --audit-level=low
           npm test --prefix chain
           npm run --prefix chain compile
-      - name: Validate Compose
-        run: docker compose config --quiet
+      - name: Validate Compose and shell scripts
+        run: |
+          sh -n enclave/entrypoint.sh
+          docker compose config --quiet
+          docker compose --profile synthetic --profile observability --profile enclave config --quiet
       - name: Exercise local synthetic end-to-end demo
         run: |
           docker compose --profile synthetic build

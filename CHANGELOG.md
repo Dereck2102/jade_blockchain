@@ -16,12 +16,14 @@ El formato sigue [Keep a Changelog 1.1.0](https://keepachangelog.com/es-ES/1.1.0
 - Matriz automatizada de los seis ataques sobre registros (`MITRE ATT&CK TA0005`) en `tests/test_attack_matrix.py`.
 - Verificación automática de higiene del repositorio (`scripts/check_repo_hygiene.py`) y sus pruebas (`tests/test_hygiene.py`) en CI para bloquear secretos, claves hexadecimales, archivos UTF-16 o datos de máquina.
 - Manifiesto público firmado de salud del firmador (`signer-status.json`) y volumen aislado `signer-data` para que el servidor de métricas no acceda a `ed25519.key`.
-- Abstracción `SignerBackend` (`FileEd25519Backend`, `CallbackSignerBackend` para HSM/TPM/KMS y `EnclaveSignerClient`), servidor IPC `jadeblock.enclave_server` y empaquetado experimental con Gramine 1.9 (`enclave/`, modos `direct` y `sgx`).
+- Simulador determinista del ciclo de vida de funciones efímeras (`jade simulate` y `jadeblock/serverless.py`), esquemas formales JSON Schema 2020-12 en `schemas/` y automatización de gobernanza (`.github/dependabot.yml` y plantillas de issues con aviso de seguridad).
+- Abstracción `SignerBackend` (`FileEd25519Backend`, `CallbackSignerBackend` para HSM/TPM/KMS y `EnclaveSignerClient` con fijación de clave pública), servidor IPC acotado `jadeblock.enclave_server` y empaquetado experimental con Gramine 1.9 (`enclave/`, modos `direct` y `sgx`).
 - Bloqueo explícito de archivos y carpetas de contexto o documentos binarios (`*.zip`, `*.docx`, `*.pdf`, `contexto/`, reportes de inventario) en `.gitignore` y `scripts/check_repo_hygiene.py`, junto con `.gitattributes` para normalizar fin de línea LF.
 - Módulo compartido `chain/lib.mjs` y matriz de trazabilidad normativa/calidad en `docs/STANDARDS_MAPPING.md` (NIST SP 800-201, SP 800-218 SSDF, ISO/IEC 27037, ISO/IEC 27001:2022, ISO/IEC 25010:2023, SOLID y ATT&CK).
 
 ### Cambiado
 
+- Optimización de bucles y E/S: caché por digest SHA-256 y agrupación lineal en `metrics.py`, índice por hash y escritura única de estado en `cli.py`/`signer.py`, indexación `Map` $O(N)$ en `anchor.mjs`/`verify.mjs`, y prefiltro lineal en `check_repo_hygiene.py`.
 - El anclador (`chain/anchor.mjs`) y los verificadores (`jadeblock/verify.py`, `chain/verify.mjs`) ahora operan con anclaje de prefijo mediante checkpoint del último evento firmado (y modo periódico opcional con `ANCHOR_INTERVAL_SECONDS`), validando emisores autorizados por nodo, timeouts de red y enteros seguros.
 - Contenedores Docker configurados como usuario no-root (`1000:1000`), montajes `:ro` en `metrics` y `verifier`, retirada de la API `QBFT` y de `--host-allowlist=*` en Besu RPC, y desactivación de `--web.enable-lifecycle` en Prometheus.
 - `README.md` reescrito como guía exploratoria concisa y titular de `LICENSE` actualizado a Dereck Amacoria y Jacqueline Andrango.
