@@ -20,3 +20,6 @@ crash.log
 *.key
 *.pem
 ansible/inventory/generated*
+.vs/
+.vscode/
+.idea/
