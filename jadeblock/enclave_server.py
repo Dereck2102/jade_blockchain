@@ -1,5 +1,6 @@
 """Servicio firmador aislado por socket TCP local (compatible con Gramine direct/SGX)."""
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import socketserver
@@ -46,8 +47,10 @@ def dispatch_signer_request(signer: EventSigner, raw_line: bytes) -> dict:
                 "status": signer.build_status_manifest(counter=signed["firma_n"]),
             }
         return {"ok": False, "error": "Operación no soportada"}
-    except (ValueError, RuntimeError, OSError) as exc:
+    except ValueError as exc:
         return {"ok": False, "error": str(exc)}
+    except (RuntimeError, OSError):
+        return {"ok": False, "error": "Fallo interno del servicio firmador"}
 
 
 class _SignerTCPHandler(socketserver.StreamRequestHandler):
@@ -62,14 +65,32 @@ class _SignerTCPHandler(socketserver.StreamRequestHandler):
         self.wfile.flush()
 
 
-class EnclaveSignerServer(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
-    daemon_threads = True
+class EnclaveSignerServer(socketserver.TCPServer):
+    """Servidor TCP con pool de hilos acotado para evitar agotamiento de recursos."""
 
-    def __init__(self, server_address: tuple[str, int], signer: EventSigner):
+    allow_reuse_address = True
+    request_queue_size = 16
+
+    def __init__(self, server_address: tuple[str, int], signer: EventSigner, max_workers: int = 8):
         super().__init__(server_address, _SignerTCPHandler)
         self._signer = signer
         self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+
+    def process_request(self, request, client_address):
+        self._executor.submit(self._process_request_thread, request, client_address)
+
+    def _process_request_thread(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+
+    def server_close(self):
+        super().server_close()
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     def dispatch(self, raw_line: bytes) -> dict:
         with self._lock:

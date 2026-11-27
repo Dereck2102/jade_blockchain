@@ -100,10 +100,33 @@ def parse_endpoint(endpoint: str) -> tuple[str, int]:
 class EnclaveSignerClient:
     """Cliente IPC hacia un servicio firmador aislado (p. ej. Gramine SGX/direct o micro-VM)."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 9201, timeout: float = 5.0):
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 9201,
+        timeout: float = 5.0,
+        pinned_public_key: Ed25519PublicKey | None = None,
+    ):
         self.host = host
         self.port = port
         self.timeout = timeout
+        self.pinned_public_key = pinned_public_key
+
+    def _resolve_and_verify_key(self, manifest: dict) -> Ed25519PublicKey:
+        pub_b64 = manifest.get("public_key")
+        if not isinstance(pub_b64, str):
+            raise RuntimeError("Clave pública inválida en el servicio firmador")
+        remote_key = Ed25519PublicKey.from_public_bytes(base64.b64decode(pub_b64, validate=True))
+        if self.pinned_public_key is not None:
+            raw_enc = serialization.Encoding.Raw
+            raw_fmt = serialization.PublicFormat.Raw
+            if remote_key.public_bytes(raw_enc, raw_fmt) != self.pinned_public_key.public_bytes(
+                raw_enc, raw_fmt
+            ):
+                raise RuntimeError(
+                    "La clave pública devuelta por el servicio firmador no coincide con la clave fijada"
+                )
+        return remote_key
 
     def _request(self, payload: dict) -> dict:
         encoded = (strict_json_dumps(payload) + "\n").encode("utf-8")
@@ -137,26 +160,19 @@ class EnclaveSignerClient:
         return manifest
 
     def public_key(self) -> Ed25519PublicKey:
-        manifest = self.status()
-        pub_b64 = manifest.get("public_key")
-        if not isinstance(pub_b64, str):
-            raise RuntimeError("Clave pública inválida en el servicio firmador")
-        return Ed25519PublicKey.from_public_bytes(base64.b64decode(pub_b64, validate=True))
+        return self._resolve_and_verify_key(self.status())
 
     def lookup(self, request_id: str) -> tuple[dict | None, dict]:
         response = self._request({"op": "lookup", "request_id": request_id})
         manifest = response.get("status")
         if not isinstance(manifest, dict):
             raise RuntimeError("Manifiesto de estado ausente en respuesta del firmador")
+        pub_key = self._resolve_and_verify_key(manifest)
         event = response.get("event")
         if event is None:
             return None, manifest
         if not isinstance(event, dict):
             raise RuntimeError("Evento previo mal formado devuelto por el enclave")
-        pub_b64 = manifest.get("public_key")
-        if not isinstance(pub_b64, str):
-            raise RuntimeError("Clave pública inválida en el servicio firmador")
-        pub_key = Ed25519PublicKey.from_public_bytes(base64.b64decode(pub_b64, validate=True))
         if not verify_signature(event, pub_key):
             raise RuntimeError("La firma del evento recuperado del enclave no verificó")
         return event, manifest
@@ -167,15 +183,13 @@ class EnclaveSignerClient:
         manifest = response.get("status")
         if not isinstance(event, dict) or not isinstance(manifest, dict):
             raise RuntimeError("Respuesta de firma incompleta desde el enclave")
-        pub_b64 = manifest.get("public_key")
+        pub_key = self._resolve_and_verify_key(manifest)
         if (
-            not isinstance(pub_b64, str)
-            or not isinstance(event.get("hash"), str)
+            not isinstance(event.get("hash"), str)
             or not HEX_64_RE.fullmatch(event["hash"])
             or not is_positive_int(event.get("firma_n"))
         ):
             raise RuntimeError("Metadatos de firma inválidos devueltos por el enclave")
-        pub_key = Ed25519PublicKey.from_public_bytes(base64.b64decode(pub_b64, validate=True))
         if not verify_signature(event, pub_key):
             raise RuntimeError("La firma devuelta por el servicio firmador no verificó")
         return event, manifest

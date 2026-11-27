@@ -19,7 +19,8 @@ docs
 infrastructure
 ansible
 observability
-enclave
+enclave/*.sgx
+enclave/*.sig
 *.tfstate*
 *.tfplan
 *.tfvars
