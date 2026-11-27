@@ -1,19 +1,30 @@
-"""Firmador Ed25519 con contador persistente e idempotencia durable."""
+"""Firmador Ed25519 con contador persistente, bloqueo e idempotencia durable."""
 
 import base64
-import hashlib
+from contextlib import contextmanager
+from datetime import datetime, timezone
 import json
 import os
-import tempfile
 from pathlib import Path
+import tempfile
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
 
-from .protocol import event_body, event_hash, sign_event
+from .protocol import (
+    MAX_SAFE_COUNTER,
+    event_hash,
+    public_key_bytes,
+    sign_event,
+    strict_json_dumps,
+    strict_json_loads,
+)
+
+MAX_RETAINED_CONFIRMED_REQUESTS = 256
 
 
 def _fsync_directory(path: Path) -> None:
@@ -31,14 +42,45 @@ def _fsync_directory(path: Path) -> None:
         os.close(directory_fd)
 
 
-def _atomic_json(path: Path, value: dict, mode: int = 0o600) -> None:
+@contextmanager
+def file_lock(lock_path: Path):
+    """Bloqueo exclusivo entre procesos sobre un archivo centinela."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         if hasattr(os, "fchmod"):
             os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, ensure_ascii=False, sort_keys=True)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -51,18 +93,59 @@ def _atomic_json(path: Path, value: dict, mode: int = 0o600) -> None:
         raise
 
 
+def _atomic_json(path: Path, value: dict, mode: int = 0o600) -> None:
+    atomic_write_text(path, strict_json_dumps(value) + "\n", mode=mode)
+
+
+def _status_payload(counter: int, pub_b64: str) -> bytes:
+    return f"jade-signer-status|{counter}|{pub_b64}".encode("utf-8")
+
+
+def verify_signer_status_file(status_path: Path, trusted_key: Ed25519PublicKey | None) -> bool:
+    """Verifica el manifiesto público de salud del firmador sin acceder a la clave privada."""
+    if trusted_key is None or not status_path.is_file():
+        return False
+    try:
+        data = strict_json_loads(status_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+        counter = data.get("counter")
+        pub_b64 = data.get("public_key")
+        sig_b64 = data.get("probe_signature")
+        if (
+            isinstance(counter, bool)
+            or not isinstance(counter, int)
+            or counter < 0
+            or counter > MAX_SAFE_COUNTER
+            or not isinstance(pub_b64, str)
+            or not isinstance(sig_b64, str)
+        ):
+            return False
+        expected_pub = base64.b64encode(public_key_bytes(trusted_key)).decode("ascii")
+        if pub_b64 != expected_pub:
+            return False
+        sig = base64.b64decode(sig_b64, validate=True)
+        trusted_key.verify(sig, _status_payload(counter, pub_b64))
+        return True
+    except (OSError, UnicodeError, ValueError, TypeError, InvalidSignature):
+        return False
+
+
 class EventSigner:
     def __init__(self, state_dir: Path):
         self.state_dir = Path(state_dir)
         self.key_path = self.state_dir / "ed25519.key"
         self.state_path = self.state_dir / "signer-state.json"
+        self.status_path = self.state_dir / "signer-status.json"
+        self.lock_path = self.state_dir / ".signer.lock"
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        if not self.key_path.exists() and self.state_path.exists():
-            raise RuntimeError(
-                f"Falta la clave del firmador; no se genera otra para el estado existente: {self.key_path}"
-            )
-        self._new_key_created = not self.key_path.exists()
-        self.private_key = self._load_or_create_key()
+        with file_lock(self.lock_path):
+            if not self.key_path.exists() and self.state_path.exists():
+                raise RuntimeError(
+                    f"Falta la clave del firmador; no se genera otra para el estado existente: {self.key_path}"
+                )
+            self._new_key_created = not self.key_path.exists()
+            self.private_key = self._load_or_create_key()
 
     def _load_or_create_key(self) -> Ed25519PrivateKey:
         try:
@@ -86,8 +169,32 @@ class EventSigner:
     def public_key(self) -> Ed25519PublicKey:
         return self.private_key.public_key()
 
+    def counter(self) -> int:
+        return self._load_state()["counter"]
+
+    def build_status_manifest(self, counter: int | None = None) -> dict:
+        current = self.counter() if counter is None else counter
+        pub_b64 = base64.b64encode(public_key_bytes(self.public_key())).decode("ascii")
+        sig = self.private_key.sign(_status_payload(current, pub_b64))
+        return {
+            "counter": current,
+            "public_key": pub_b64,
+            "probe_signature": base64.b64encode(sig).decode("ascii"),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def write_status_manifest(self, target_path: Path | None = None, counter: int | None = None) -> None:
+        manifest = self.build_status_manifest(counter=counter)
+        _atomic_json(target_path or self.status_path, manifest, mode=0o644)
+
     def request_result(self, request_id: str) -> dict | None:
-        return self._load_state()["requests"].get(request_id, {}).get("event")
+        requests = self._load_state()["requests"]
+        entry = requests.get(request_id)
+        if entry is None:
+            return None
+        if not isinstance(entry, dict) or not isinstance(entry.get("event"), dict):
+            raise RuntimeError("Registro de solicitud del firmador mal formado")
+        return entry["event"]
 
     def request_events(self) -> dict[str, dict]:
         requests = self._load_state()["requests"]
@@ -98,6 +205,33 @@ class EventSigner:
             events[request_id] = request["event"]
         return events
 
+    def prune_confirmed_requests(
+        self,
+        recorded_hashes: set[str],
+        max_retained: int = MAX_RETAINED_CONFIRMED_REQUESTS,
+    ) -> None:
+        """Acota el historial de solicitudes ya persistidas en el ledger."""
+        with file_lock(self.lock_path):
+            if not self.state_path.exists():
+                return
+            state = self._load_state()
+            requests = state["requests"]
+            confirmed_ids = [
+                req_id
+                for req_id, entry in requests.items()
+                if isinstance(entry, dict)
+                and isinstance(entry.get("event"), dict)
+                and entry["event"].get("hash") in recorded_hashes
+            ]
+            if len(confirmed_ids) <= max_retained:
+                return
+            confirmed_ids.sort(key=lambda req_id: requests[req_id]["event"].get("firma_n", 0))
+            to_drop = set(confirmed_ids[: len(confirmed_ids) - max_retained])
+            state["requests"] = {
+                req_id: entry for req_id, entry in requests.items() if req_id not in to_drop
+            }
+            _atomic_json(self.state_path, state)
+
     def _load_state(self) -> dict:
         if not self.state_path.exists():
             if not self._new_key_created:
@@ -106,11 +240,14 @@ class EventSigner:
                 )
             return {"counter": 0, "requests": {}}
         try:
-            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            state = strict_json_loads(self.state_path.read_text(encoding="utf-8"))
+            counter = state.get("counter") if isinstance(state, dict) else None
             if (
                 not isinstance(state, dict)
-                or not isinstance(state.get("counter"), int)
-                or state["counter"] < 0
+                or isinstance(counter, bool)
+                or not isinstance(counter, int)
+                or counter < 0
+                or counter > MAX_SAFE_COUNTER
                 or not isinstance(state.get("requests"), dict)
             ):
                 raise ValueError("estructura inválida")
@@ -121,21 +258,23 @@ class EventSigner:
             ) from exc
 
     def sign(self, body: dict, request_id: str) -> dict:
-        if not request_id or len(request_id) > 200:
-            raise ValueError("request_id debe tener entre 1 y 200 caracteres")
-        request_digest = hashlib.sha256(
-            json.dumps(event_body(body), sort_keys=True, ensure_ascii=False).encode(
-                "utf-8"
-            )
-        ).hexdigest()
-        state = self._load_state()
-        previous = state["requests"].get(request_id)
-        if previous is not None:
-            if previous.get("input_hash") != request_digest:
-                raise ValueError("request_id ya utilizado con otro contenido")
-            return previous["event"]
-        event = sign_event(body, state["counter"] + 1, self.private_key)
-        state["counter"] += 1
-        state["requests"][request_id] = {"input_hash": request_digest, "event": event}
-        _atomic_json(self.state_path, state)
-        return event
+        if not isinstance(request_id, str) or not request_id or len(request_id) > 200:
+            raise ValueError("request_id debe ser texto de entre 1 y 200 caracteres")
+        request_digest = event_hash(body)
+        with file_lock(self.lock_path):
+            state = self._load_state()
+            previous = state["requests"].get(request_id)
+            if previous is not None:
+                if not isinstance(previous, dict) or not isinstance(previous.get("event"), dict):
+                    raise RuntimeError("Registro de solicitud del firmador mal formado")
+                if previous.get("input_hash") != request_digest:
+                    raise ValueError("request_id ya utilizado con otro contenido")
+                return previous["event"]
+            next_counter = state["counter"] + 1
+            event = sign_event(body, next_counter, self.private_key)
+            state["counter"] = next_counter
+            state["requests"][request_id] = {"input_hash": request_digest, "event": event}
+            _atomic_json(self.state_path, state)
+            self._new_key_created = False
+            self.write_status_manifest(counter=next_counter)
+            return event

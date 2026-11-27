@@ -248,6 +248,121 @@ class SignerPersistenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no coincide"):
             generate(args)
 
+    def test_strict_validation_rejects_nan_bad_hex_bool_counter_and_missing_fields(self):
+        with self.assertRaises(ValueError):
+            sign_event({**BODY, "datos": {"x": float("nan")}}, 1, self.key if hasattr(self, "key") else Ed25519PrivateKey.generate())
+        key = Ed25519PrivateKey.generate()
+        with self.assertRaises(ValueError):
+            sign_event({**BODY, "hash_anterior": "0x" + "0" * 62}, 1, key)
+        with self.assertRaises(ValueError):
+            sign_event({**BODY, "hash_anterior": "0_" + "0" * 62}, 1, key)
+        with self.assertRaises(ValueError):
+            sign_event(BODY, True, key)
+        with self.assertRaises(ValueError):
+            sign_event(BODY, 0, key)
+
+        valid = sign_event(BODY, 1, key)
+        missing_type = {k: v for k, v in valid.items() if k != "tipo"}
+        result = verify_evidence([missing_type], key.public_key(), None)
+        self.assertFalse(result["integrity"]["ok"])
+        self.assertEqual(result["status"], "invalid")
+        self.assertEqual(verify_evidence(["no-es-dict"], key.public_key(), None)["status"], "invalid")
+
+    def test_interleaved_multinode_chain_and_checkpoints_verify(self):
+        key = Ed25519PrivateKey.generate()
+        e1 = sign_event({**BODY, "nodo": "nodo-1", "hash_anterior": ZERO_HASH}, 1, key)
+        e2 = sign_event({**BODY, "nodo": "nodo-2", "hash_anterior": e1["hash"]}, 1, key)
+        e3 = sign_event({**BODY, "nodo": "nodo-1", "hash_anterior": e2["hash"]}, 2, key)
+        anchors = [
+            {"nodo": "nodo-1", "firma_n": 2, "hash": e3["hash"]},
+            {"nodo": "nodo-2", "firma_n": 1, "hash": e2["hash"]},
+        ]
+        result = verify_evidence([e1, e2, e3], key.public_key(), anchors)
+        self.assertTrue(result["integrity"]["ok"])
+        self.assertTrue(result["authenticity"]["ok"])
+        self.assertEqual(result["anchor_coverage"]["status"], "local_only")
+        self.assertEqual(
+            result["anchor_coverage"]["anchored_prefix_by_node"],
+            {"nodo-1": 2, "nodo-2": 1},
+        )
+
+    def test_cli_main_exit_codes_trusted_key_protection_and_pruning(self):
+        from jadeblock.cli import main
+
+        events_path = Path(self.temporary.name) / "cli-main-events.jsonl"
+        state_dir = Path(self.temporary.name) / "cli-main-signer"
+        pub_path = Path(self.temporary.name) / "cli-main-pub.b64"
+        anchors_path = Path(self.temporary.name) / "cli-main-anchors.json"
+
+        code_gen = main(
+            [
+                "generate",
+                "--events",
+                str(events_path),
+                "--state-dir",
+                str(state_dir),
+                "--public-key",
+                str(pub_path),
+                "--request-id",
+                "r-1",
+            ]
+        )
+        self.assertEqual(code_gen, 0)
+        code_verify_incomplete = main(
+            [
+                "verify",
+                "--events",
+                str(events_path),
+                "--public-key",
+                str(pub_path),
+                "--anchors",
+                str(anchors_path),
+            ]
+        )
+        self.assertEqual(code_verify_incomplete, 2)
+
+        # No debe sobrescribir una clave pública confiable distinta ya existente.
+        other_signer_dir = Path(self.temporary.name) / "other-signer"
+        other_pub_path = Path(self.temporary.name) / "other-pub.b64"
+        code_other = main(
+            [
+                "generate",
+                "--events",
+                str(Path(self.temporary.name) / "other-events.jsonl"),
+                "--state-dir",
+                str(other_signer_dir),
+                "--public-key",
+                str(other_pub_path),
+            ]
+        )
+        self.assertEqual(code_other, 0)
+        code_mismatch = main(
+            [
+                "generate",
+                "--events",
+                str(events_path),
+                "--state-dir",
+                str(state_dir),
+                "--public-key",
+                str(other_pub_path),
+                "--request-id",
+                "r-2",
+            ]
+        )
+        self.assertEqual(code_mismatch, 1)
+        self.assertEqual(EventSigner(state_dir).counter(), 1)
+
+        # Poda de solicitudes confirmadas conserva solicitudes pendientes.
+        signer = EventSigner(state_dir)
+        recorded = {e["hash"] for e in json.loads("[" + ",".join(events_path.read_text(encoding="utf-8").splitlines()) + "]")}
+        e2 = signer.sign({**BODY, "hash_anterior": next(iter(recorded))}, "r-2")
+        e3_pending = signer.sign({**BODY, "hash_anterior": e2["hash"]}, "r-3-pending")
+        signer.prune_confirmed_requests(recorded | {e2["hash"]}, max_retained=1)
+        remaining = signer.request_events()
+        self.assertNotIn("r-1", remaining)
+        self.assertIn("r-2", remaining)
+        self.assertEqual(remaining["r-3-pending"], e3_pending)
+
 
 if __name__ == "__main__":
     unittest.main()
