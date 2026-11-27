@@ -8,11 +8,11 @@ groups:
           severity: warning
       - alert: JadeUnsignedEvents
         expr: jade_events_unsigned > 0
-        for: 1m
+        for: 0m
         labels:
           severity: critical
       - alert: JadeAnchorRejected
-        expr: jade_anchor_rejected > 0
+        expr: increase(jade_anchor_rejected[10m]) > 0
         for: 0m
         labels:
           severity: critical
