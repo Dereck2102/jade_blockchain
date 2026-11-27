@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548
+        with:
+          python-version: "3.12"
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: "1.17.2"
+      - name: Install Python dependencies
+        run: |
+          python -m pip install "ansible-core==2.21.6" .
+      - name: Test Python protocol
+        run: python -m unittest discover -s tests -v
+      - name: Test contract and dependency audit
+        run: |
+          npm ci --prefix chain
+          npm audit --prefix chain --audit-level=low
+          npm test --prefix chain
+          npm run --prefix chain compile
+      - name: Validate Compose
+        run: docker compose config --quiet
+      - name: Exercise local synthetic end-to-end demo
+        run: |
+          docker compose --profile synthetic build
+          docker compose up -d besu contract metrics
+          docker compose --profile synthetic run --rm demo generate \
+            --events /data/events.jsonl \
+            --state-dir /data/signer \
+            --public-key /data/trusted-public-key.b64 \
+            --node demo-node \
+            --request-id ci-demo-001
+          docker compose --profile synthetic run --rm anchor
+          docker compose --profile synthetic run --rm verifier
+      - name: Stop local demo services
+        if: always()
+        run: docker compose down
+      - name: Validate Terraform
+        run: |
+          terraform fmt -check -recursive infrastructure/proxmox
+          terraform -chdir=infrastructure/proxmox init -backend=false -input=false
+          terraform -chdir=infrastructure/proxmox validate -no-color
+      - name: Validate Ansible syntax
+        working-directory: ansible
+        run: ansible-playbook --syntax-check -i inventory/example.yml site.yml

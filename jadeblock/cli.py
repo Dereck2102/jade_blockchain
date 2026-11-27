@@ -4,11 +4,10 @@ import argparse
 import base64
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import sys
 import uuid
-
-from cryptography.hazmat.primitives import serialization
 
 from .protocol import ZERO_HASH, public_key_bytes
 from .signer import EventSigner
@@ -29,20 +28,43 @@ def generate(args) -> int:
     events = read_events(ledger) if ledger.exists() else []
     previous_hash = events[-1]["hash"] if events else ZERO_HASH
     signer = EventSigner(Path(args.state_dir))
-    body = {
-        "fecha": datetime.now(timezone.utc).isoformat(),
-        "nodo": args.node,
-        "origen": "generador-sintetico",
-        "tipo": "archivo_modificado",
-        "nivel": "info",
-        "hash_anterior": previous_hash,
-        "datos": {"mensaje": "evento sintético de demostración", "secuencia": len(events) + 1},
+    request_id = args.request_id or str(uuid.uuid4())
+    signed_requests = signer.request_events()
+    recorded_events = {json.dumps(event, sort_keys=True, ensure_ascii=False) for event in events}
+    pending_requests = {
+        pending_id: event
+        for pending_id, event in signed_requests.items()
+        if json.dumps(event, sort_keys=True, ensure_ascii=False) not in recorded_events
     }
-    signed = signer.sign(body, args.request_id or str(uuid.uuid4()))
-    if not any(event.get("hash") == signed["hash"] for event in events):
+    if pending_requests and request_id not in pending_requests:
+        raise RuntimeError(
+            "Hay una solicitud firmada pendiente; reintente su request_id antes de generar otro evento"
+        )
+    signed = signer.request_result(request_id)
+    if signed is not None and signed.get("nodo") != args.node:
+        raise ValueError("request_id ya utilizado para otro nodo")
+    if signed is None:
+        body = {
+            "fecha": datetime.now(timezone.utc).isoformat(),
+            "nodo": args.node,
+            "origen": "generador-sintetico",
+            "tipo": "archivo_modificado",
+            "nivel": "info",
+            "hash_anterior": previous_hash,
+            "datos": {"mensaje": "evento sintético de demostración", "secuencia": len(events) + 1},
+        }
+        signed = signer.sign(body, request_id)
+    matching_events = [event for event in events if event.get("hash") == signed["hash"]]
+    if any(event != signed for event in matching_events):
+        raise RuntimeError("El evento del ledger no coincide con la solicitud firmada")
+    already_recorded = bool(matching_events)
+    if not already_recorded and signed["hash_anterior"] != previous_hash:
+        raise RuntimeError("Solicitud firmada pendiente fuera del final del ledger; se detiene para recuperar")
+    if not already_recorded:
         with ledger.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(signed, ensure_ascii=False, sort_keys=True) + "\n")
             stream.flush()
+            os.fsync(stream.fileno())
     _write_public_key(Path(args.public_key), signer)
     print(json.dumps(signed, ensure_ascii=False, sort_keys=True))
     return 0
@@ -51,11 +73,7 @@ def generate(args) -> int:
 def verify(args) -> int:
     result = verify_files(args.events, args.public_key, args.anchors)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    if result["status"] == "verified":
-        return 0
-    if result["status"] == "incomplete":
-        return 2
-    return 1
+    return 1 if result["status"] == "invalid" else 2
 
 
 def main(argv=None) -> int:
@@ -83,4 +101,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

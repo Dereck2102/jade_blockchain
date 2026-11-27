@@ -1,0 +1,169 @@
+services:
+  chain-keygen:
+    image: hyperledger/besu:26.11.2
+    user: "0:0"
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        if [ ! -f /network/networkFiles/genesis.json ]; then
+          besu operator generate-blockchain-config \
+            --config-file=/config/qbft-config.json \
+            --to=/network/networkFiles \
+            --private-key-file-name=key
+        fi
+        chown -R 1000:1000 /network /var/lib/besu/data
+    volumes:
+      - chain-network:/network
+      - besu-data:/var/lib/besu/data
+      - ./chain/qbft-config.json:/config/qbft-config.json:ro
+    restart: "no"
+  chain-bootstrap:
+    build:
+      context: ./chain
+    command: ["node", "bootstrap.mjs"]
+    environment:
+      CHAIN_DATA: /chain
+    volumes:
+      - chain-network:/chain
+    depends_on:
+      chain-keygen:
+        condition: service_completed_successfully
+    restart: "no"
+  besu:
+    image: hyperledger/besu:26.11.2
+    command:
+      - --data-path=/var/lib/besu/data
+      - --genesis-file=/network/networkFiles/genesis.json
+      - --node-private-key-file=/network/networkFiles/keys/0/key
+      - --rpc-http-enabled
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,WEB3,QBFT
+      - --host-allowlist=*
+    ports:
+      - "127.0.0.1:${BESU_RPC_PORT:-8545}:8545"
+    volumes:
+      - chain-network:/network:ro
+      - besu-data:/var/lib/besu/data
+    depends_on:
+      chain-bootstrap:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  contract:
+    build:
+      context: ./chain
+    command: ["node", "deploy.mjs"]
+    environment:
+      CHAIN_DATA: /chain
+      BESU_RPC_URL: http://besu:8545
+      JADE_NODE: demo-node
+    volumes:
+      - chain-network:/chain
+    depends_on:
+      besu:
+        condition: service_started
+    restart: "no"
+  metrics:
+    build: .
+    entrypoint: ["python3", "-m", "jadeblock.metrics"]
+    environment:
+      JADE_DATA: /data
+      JADE_NODE: demo-node
+      METRICS_PORT: 9108
+    ports:
+      - "127.0.0.1:${METRICS_PORT:-9108}:9108"
+    volumes:
+      - jade-data:/data
+    restart: unless-stopped
+  demo:
+    build: .
+    profiles: ["synthetic"]
+    command:
+      - generate
+      - --events
+      - /data/events.jsonl
+      - --state-dir
+      - /data/signer
+      - --public-key
+      - /data/trusted-public-key.b64
+      - --node
+      - demo-node
+    volumes:
+      - jade-data:/data
+  anchor:
+    build:
+      context: ./chain
+    command: ["node", "anchor.mjs"]
+    profiles: ["synthetic"]
+    environment:
+      CHAIN_DATA: /chain
+      JADE_DATA: /data
+      BESU_RPC_URL: http://besu:8545
+      VERIFIER_URL: http://metrics:9108/verify
+      JADE_NODE: demo-node
+    volumes:
+      - chain-network:/chain
+      - jade-data:/data
+    depends_on:
+      contract:
+        condition: service_completed_successfully
+      metrics:
+        condition: service_started
+  verifier:
+    build:
+      context: ./chain
+    command: ["node", "verify.mjs"]
+    profiles: ["synthetic"]
+    environment:
+      CHAIN_DATA: /chain
+      JADE_DATA: /data
+      BESU_RPC_URL: http://besu:8545
+      VERIFIER_URL: http://metrics:9108/verify
+      JADE_NODE: demo-node
+    volumes:
+      - chain-network:/chain
+      - jade-data:/data
+    depends_on:
+      contract:
+        condition: service_completed_successfully
+      metrics:
+        condition: service_started
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - metrics
+  grafana:
+    image: grafana/grafana:13.3.2
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana-provisioning:/etc/grafana/provisioning:ro
+      - ./observability/dashboard.json:/var/lib/grafana/dashboards/jade.json:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  chain-network:
+    name: ${JADE_CHAIN_VOLUME:-jade-blockchain-chain-network}
+  besu-data:
+    name: ${JADE_BESU_VOLUME:-jade-blockchain-besu-data}
+  jade-data:
+    name: ${JADE_EVENTS_VOLUME:-jade-blockchain-events}
+  prometheus-data:
+    name: ${JADE_PROMETHEUS_VOLUME:-jade-blockchain-prometheus-data}
+  grafana-data:
+    name: ${JADE_GRAFANA_VOLUME:-jade-blockchain-grafana-data}

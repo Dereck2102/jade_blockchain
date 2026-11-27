@@ -4,7 +4,6 @@ import base64
 import json
 from pathlib import Path
 
-from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .protocol import ZERO_HASH, event_hash, verify_signature
@@ -94,9 +93,9 @@ def verify_evidence(
                 anchor_ok = False
                 failures.append("registro de ancla mal formado")
                 continue
-            if counter <= last_by_node.get(node, 0):
+            if counter != last_by_node.get(node, 0) + 1:
                 anchor_ok = False
-                failures.append(f"regresión o duplicado de ancla para {node}")
+                failures.append(f"regresión, hueco o duplicado de ancla para {node}")
                 continue
             last_by_node[node] = counter
             covered_event = event_by_node_counter.get((node, counter))
@@ -108,25 +107,21 @@ def verify_evidence(
         for node, counter in counters.items():
             if covered.get(node, 0) < counter:
                 pending[node] = counter - covered.get(node, 0)
-        if not pending and anchor_ok:
-            anchor_state = "complete"
-        elif not anchor_ok:
+        if not anchor_ok:
             anchor_state = "invalid"
+        elif not pending:
+            anchor_state = "local_only"
 
-    complete = chain_ok and signatures_ok and anchor_ok and anchor_state == "complete"
     return {
         "schema_version": "1",
-        "status": "verified" if complete else (
-            "invalid" if not chain_ok or not signatures_ok or anchor_state == "invalid"
-            else "incomplete"
-        ),
+        "status": "invalid" if not chain_ok or not signatures_ok or anchor_state == "invalid" else "incomplete",
         "integrity": {"checked": True, "ok": chain_ok},
         "authenticity": {
             "checked": public_key is not None,
             "ok": signatures_ok,
         },
         "anchor_coverage": {
-            "checked": anchors is not None and len(anchors) > 0,
+            "checked": False,
             "status": anchor_state,
             "anchored_prefix_by_node": covered,
             "pending_events_by_node": pending,
@@ -145,4 +140,3 @@ def verify_files(events_path: Path, public_key_path: Path | None, anchors_path: 
         if not isinstance(anchors, list):
             raise ValueError("El archivo de anclas debe contener una lista JSON")
     return verify_evidence(events, key, anchors)
-

@@ -45,6 +45,11 @@ class EventSigner:
         self.key_path = self.state_dir / "ed25519.key"
         self.state_path = self.state_dir / "signer-state.json"
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        if not self.key_path.exists() and self.state_path.exists():
+            raise RuntimeError(
+                f"Falta la clave del firmador; no se genera otra para el estado existente: {self.key_path}"
+            )
+        self._new_key_created = not self.key_path.exists()
         self.private_key = self._load_or_create_key()
 
     def _load_or_create_key(self) -> Ed25519PrivateKey:
@@ -73,8 +78,24 @@ class EventSigner:
     def public_key(self) -> Ed25519PublicKey:
         return self.private_key.public_key()
 
+    def request_result(self, request_id: str) -> dict | None:
+        return self._load_state()["requests"].get(request_id, {}).get("event")
+
+    def request_events(self) -> dict[str, dict]:
+        requests = self._load_state()["requests"]
+        events = {}
+        for request_id, request in requests.items():
+            if not isinstance(request, dict) or not isinstance(request.get("event"), dict):
+                raise RuntimeError("Registro de solicitud del firmador mal formado")
+            events[request_id] = request["event"]
+        return events
+
     def _load_state(self) -> dict:
         if not self.state_path.exists():
+            if not self._new_key_created:
+                raise RuntimeError(
+                    f"Falta el estado del firmador; no se reinicia el contador: {self.state_path}"
+                )
             return {"counter": 0, "requests": {}}
         try:
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -110,4 +131,3 @@ class EventSigner:
         state["requests"][request_id] = {"input_hash": request_digest, "event": event}
         _atomic_json(self.state_path, state)
         return event
-

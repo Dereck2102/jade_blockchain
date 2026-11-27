@@ -1,0 +1,75 @@
+- name: Confirmar Debian 12
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == "Debian"
+      - ansible_distribution_major_version == "12"
+    fail_msg: "Esta versión del rol solo está preparada para Debian 12."
+
+- name: Instalar runtime base
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - docker.io
+      - python3
+      - python3-venv
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Crear usuario de servicio
+  ansible.builtin.user:
+    name: jade
+    system: true
+    home: /var/lib/jade
+    create_home: true
+    shell: /usr/sbin/nologin
+
+- name: Crear directorios de aplicación y datos
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /opt/jade, owner: root, group: root, mode: "0755" }
+    - { path: /var/lib/jade/events, owner: jade, group: jade, mode: "0700" }
+
+- name: Instalar metadatos Python
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../pyproject.toml"
+    dest: /opt/jade/pyproject.toml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Instalar paquete Python
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../jadeblock/"
+    dest: /opt/jade/jadeblock/
+    owner: root
+    group: root
+    mode: preserve
+
+- name: Crear entorno virtual e instalar JaDe
+  ansible.builtin.pip:
+    name: /opt/jade
+    virtualenv: /opt/jade/venv
+    virtualenv_command: python3 -m venv
+    state: present
+
+- name: Instalar unidad systemd de métricas
+  ansible.builtin.template:
+    src: jade-metrics.service.j2
+    dest: /etc/systemd/system/jade-metrics.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reiniciar exportador JaDe
+
+- name: Habilitar exportador local
+  ansible.builtin.systemd_service:
+    name: jade-metrics.service
+    enabled: true
+    state: started
+    daemon_reload: true

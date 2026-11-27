@@ -1,0 +1,23 @@
+[Unit]
+Description=JaDe Blockchain local metrics exporter
+After=network.target
+
+[Service]
+Type=simple
+User=jade
+Group=jade
+Environment=JADE_DATA=/var/lib/jade/events
+Environment=JADE_NODE={{ inventory_hostname }}
+Environment=METRICS_HOST=127.0.0.1
+Environment=METRICS_PORT=9108
+ExecStart=/opt/jade/venv/bin/python -m jadeblock.metrics
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/jade
+
+[Install]
+WantedBy=multi-user.target

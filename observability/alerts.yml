@@ -1,0 +1,28 @@
+groups:
+  - name: jade-demo
+    rules:
+      - alert: JadeExporterNoReport
+        expr: up{job="jade-demo"} == 0
+        for: 1m
+        labels:
+          severity: warning
+      - alert: JadeUnsignedEvents
+        expr: jade_events_unsigned > 0
+        for: 1m
+        labels:
+          severity: critical
+      - alert: JadeAnchorRejected
+        expr: jade_anchor_rejected > 0
+        for: 0m
+        labels:
+          severity: critical
+      - alert: JadeAnchorDelayed
+        expr: jade_pending_events > 0 and jade_anchor_delay_seconds > 60
+        for: 1m
+        labels:
+          severity: warning
+      - alert: JadeCriticalIntegrityFailure
+        expr: jade_integrity_ok == 0
+        for: 0m
+        labels:
+          severity: critical

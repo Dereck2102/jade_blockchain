@@ -1,0 +1,5 @@
+- name: Configurar las máquinas Debian de la réplica de laboratorio
+  hosts: all
+  become: true
+  roles:
+    - jade_node
