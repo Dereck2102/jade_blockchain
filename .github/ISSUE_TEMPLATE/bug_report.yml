@@ -1,0 +1,32 @@
+name: Reporte de fallo
+description: Informa un defecto reproducible usando únicamente datos sintéticos.
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Aviso de seguridad:** Nunca incluyas claves privadas, tokens, archivos `.env`, `.tfstate`, direcciones IP privadas de laboratorio ni logs reales institucionales.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Comportamiento observado y esperado
+      description: Qué ocurrió y qué debía ocurrir.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Pasos para reproducir (solo datos sintéticos)
+      placeholder: |
+        1. python -m jadeblock.cli ...
+        2. Resultado obtenido:
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Entorno (SO, versión de Python / Node / Docker)
+      placeholder: "Ubuntu 24.04 / Windows 11, Python 3.12, Node 24"
+    validations:
+      required: true

@@ -1,21 +1,27 @@
-"""Exportador Prometheus mínimo con métricas etiquetadas por nodo."""
+"""Exportador Prometheus y endpoint de verificación local con caché por contenido."""
 
-from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import hashlib
 import json
 import os
 from pathlib import Path
+import threading
 import time
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 
-from .signer import EventSigner
-from .verify import load_public_key, read_events, verify_evidence
+from .protocol import is_positive_int, strict_json_dumps, strict_json_loads
+from .signer import EventSigner, verify_signer_status_file
+from .verify import load_public_key, parse_events_bytes, verify_evidence
 
 DATA_DIR = Path(os.environ.get("JADE_DATA", "data"))
 DEFAULT_NODE = os.environ.get("JADE_NODE", "demo-node")
+
+_SNAPSHOT_LOCK = threading.Lock()
+_SNAPSHOT_CACHE: dict[str, object] = {"key": None, "value": None}
 
 
 def _label(value: str) -> str:
@@ -31,14 +37,22 @@ def _timestamp(value) -> float | None:
         return None
 
 
-def _signer_ready(state_dir: Path, trusted_key) -> bool:
+def _signer_ready(state_dir: Path, trusted_key, status_path: Path | None = None) -> bool:
+    if trusted_key is None:
+        return False
+    manifest_candidates = [p for p in (status_path, state_dir / "signer-status.json") if p is not None]
     key_path = state_dir / "ed25519.key"
     state_path = state_dir / "signer-state.json"
-    if trusted_key is None or not key_path.is_file() or not state_path.is_file():
+
+    # Modo aislado (sin acceso a ed25519.key): verifica el manifiesto firmado con la clave pública.
+    if not key_path.is_file() and not state_path.is_file():
+        return any(verify_signer_status_file(candidate, trusted_key) for candidate in manifest_candidates)
+
+    if not key_path.is_file() or not state_path.is_file():
         return False
     try:
         signer = EventSigner(state_dir)
-        signer._load_state()
+        signer.counter()
         public_key = signer.public_key()
         encoding = serialization.Encoding.Raw
         public_format = serialization.PublicFormat.Raw
@@ -47,30 +61,102 @@ def _signer_ready(state_dir: Path, trusted_key) -> bool:
         ):
             return False
         challenge = b"jade-blockchain-signer-health-check"
-        trusted_key.verify(signer.private_key.sign(challenge), challenge)
+        trusted_key.verify(signer.sign_challenge(challenge), challenge)
         return True
     except (OSError, ValueError, TypeError, RuntimeError, InvalidSignature):
         return False
 
 
-def render_metrics() -> str:
-    events_path = DATA_DIR / "events.jsonl"
-    key_path = DATA_DIR / "trusted-public-key.b64"
-    anchors_path = DATA_DIR / "anchors.json"
+def _load_anchor_errors(anchor_errors_path: Path) -> dict[str, int]:
+    anchor_errors: dict[str, int] = {}
     try:
-        events = read_events(events_path) if events_path.exists() else []
-        anchors = json.loads(anchors_path.read_text(encoding="utf-8")) if anchors_path.exists() else []
+        error_state = strict_json_loads(anchor_errors_path.read_text(encoding="utf-8"))
+        if not isinstance(error_state, dict):
+            return anchor_errors
+        counts = error_state.get("counts")
+        if isinstance(counts, dict):
+            for node, count in counts.items():
+                if (
+                    isinstance(node, str)
+                    and node
+                    and not isinstance(count, bool)
+                    and isinstance(count, int)
+                    and count >= 0
+                ):
+                    anchor_errors[node] = count
+        else:
+            count = error_state.get("count")
+            node = error_state.get("node", DEFAULT_NODE)
+            if (
+                isinstance(node, str)
+                and node
+                and not isinstance(count, bool)
+                and isinstance(count, int)
+                and count >= 0
+            ):
+                anchor_errors[node] = count
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        pass
+    return anchor_errors
+
+
+def _load_verified_bundle(base: Path) -> tuple[list[dict], list[dict], object, dict, str | None]:
+    """Evalúa o reutiliza por digest SHA-256 la verificación criptográfica del ledger."""
+    events_path = base / "events.jsonl"
+    anchors_path = base / "anchors.json"
+    key_path = base / "trusted-public-key.b64"
+
+    raw_events = events_path.read_bytes() if events_path.exists() else None
+    raw_anchors = anchors_path.read_bytes() if anchors_path.exists() else None
+    raw_key = key_path.read_bytes() if key_path.exists() else None
+
+    events_digest = hashlib.sha256(raw_events).hexdigest() if raw_events is not None else None
+    anchors_digest = hashlib.sha256(raw_anchors).hexdigest() if raw_anchors is not None else None
+    key_digest = hashlib.sha256(raw_key).hexdigest() if raw_key is not None else None
+    cache_key = (events_digest, anchors_digest, key_digest)
+
+    with _SNAPSHOT_LOCK:
+        if _SNAPSHOT_CACHE["key"] == cache_key and _SNAPSHOT_CACHE["value"] is not None:
+            return _SNAPSHOT_CACHE["value"]  # type: ignore[return-value]
+
+    events = parse_events_bytes(raw_events) if raw_events is not None else []
+    if raw_anchors is not None:
+        anchors = strict_json_loads(raw_anchors)
         if not isinstance(anchors, list):
             raise ValueError("anchors must be an array")
-        key = load_public_key(key_path) if key_path.exists() else None
-        result = verify_evidence(events, key, anchors if anchors_path.exists() else None)
-        state_path = DATA_DIR / "signer" / "signer-state.json"
-        signer_ready = int(_signer_ready(state_path.parent, key))
-        nodes = sorted(
-            {event.get("nodo", DEFAULT_NODE) for event in events}
-            | {anchor.get("nodo", DEFAULT_NODE) for anchor in anchors}
-            | {DEFAULT_NODE}
-        )
+    else:
+        anchors = []
+    key = load_public_key(key_path) if raw_key is not None else None
+    result = verify_evidence(events, key, anchors if raw_anchors is not None else None)
+    bundle = (events, anchors, key, result, events_digest)
+
+    with _SNAPSHOT_LOCK:
+        _SNAPSHOT_CACHE["key"] = cache_key
+        _SNAPSHOT_CACHE["value"] = bundle
+    return bundle
+
+
+def render_metrics() -> str:
+    status_path = DATA_DIR / "signer-status.json"
+    try:
+        events, anchors, key, result, _ = _load_verified_bundle(DATA_DIR)
+        signer_ready = int(_signer_ready(DATA_DIR / "signer", key, status_path=status_path))
+
+        # Agrupación lineal en una sola pasada O(N) en lugar de filtrados anidados por nodo.
+        events_by_node: dict[str, list[dict]] = {}
+        for event in events:
+            if isinstance(event, dict):
+                node_name = event.get("nodo")
+                if isinstance(node_name, str) and node_name:
+                    events_by_node.setdefault(node_name, []).append(event)
+
+        anchor_nodes = {
+            anchor["nodo"]
+            for anchor in anchors
+            if isinstance(anchor, dict) and isinstance(anchor.get("nodo"), str) and anchor["nodo"]
+        }
+        nodes = sorted(set(events_by_node) | anchor_nodes | {DEFAULT_NODE})
+
         lines = [
             "# HELP jade_exporter_up Exporter is serving metrics.",
             "# TYPE jade_exporter_up gauge",
@@ -85,57 +171,42 @@ def render_metrics() -> str:
             "# TYPE jade_events_unsigned gauge",
             "# HELP jade_pending_events Events after the latest verified local anchor.",
             "# TYPE jade_pending_events gauge",
-            "# HELP jade_anchor_delay_seconds Age of the newest local anchor, or unanchored event.",
+            "# HELP jade_anchor_delay_seconds Age of the oldest unanchored event in seconds (0 when caught up).",
             "# TYPE jade_anchor_delay_seconds gauge",
             "# HELP jade_anchor_rejected Total recorded anchor failures.",
             "# TYPE jade_anchor_rejected counter",
-            "# HELP jade_integrity_ok Whether the local chain and signatures verify.",
+            "# HELP jade_integrity_ok Whether chain, signatures, and local anchor consistency hold.",
             "# TYPE jade_integrity_ok gauge",
         ]
-        anchor_errors_path = DATA_DIR / "anchor-errors.json"
-        anchor_errors = {}
-        try:
-            error_state = json.loads(anchor_errors_path.read_text(encoding="utf-8"))
-            counts = error_state.get("counts")
-            if isinstance(counts, dict):
-                anchor_errors.update(
-                    {
-                        node: count
-                        for node, count in counts.items()
-                        if isinstance(node, str) and isinstance(count, int) and count >= 0
-                    }
-                )
-            elif isinstance(error_state.get("count"), int):
-                anchor_errors[error_state.get("node", DEFAULT_NODE)] = error_state["count"]
-        except (OSError, json.JSONDecodeError, AttributeError):
-            pass
+        anchor_errors = _load_anchor_errors(DATA_DIR / "anchor-errors.json")
         now = time.time()
+        verified_prefixes = result["anchor_coverage"]["anchored_prefix_by_node"]
+        anchor_status = result["anchor_coverage"]["status"]
+        overall_ok = int(result["status"] != "invalid")
+
         for node in nodes:
             label = _label(node)
-            node_events = [event for event in events if event.get("nodo") == node]
-            node_anchors = [anchor for anchor in anchors if anchor.get("nodo") == node]
-            anchored_counter = max((anchor.get("firma_n", 0) for anchor in node_anchors), default=0)
-            unsigned = sum(
-                "firma" not in event or "firma_n" not in event for event in node_events
-            )
-            timestamps = [_timestamp(event.get("fecha")) for event in node_events]
-            event_times = [stamp for stamp in timestamps if stamp is not None]
-            anchor_times = [
-                anchor.get("anchored_at")
-                for anchor in node_anchors
-                if isinstance(anchor.get("anchored_at"), (int, float))
-            ]
-            newest_time = max(anchor_times, default=max(event_times, default=now))
-            max_event_counter = max(
-                (
-                    event.get("firma_n", 0)
-                    for event in node_events
-                    if isinstance(event.get("firma_n"), int) and not isinstance(event.get("firma_n"), bool)
-                ),
-                default=0,
-            )
+            node_events = events_by_node.get(node, ())
+            anchored_counter = verified_prefixes.get(node, 0) if anchor_status != "invalid" else 0
+            unsigned = 0
+            max_event_counter = 0
+            oldest_pending_time: float | None = None
+
+            for event in node_events:
+                counter = event.get("firma_n")
+                valid_counter = is_positive_int(counter)
+                if "firma" not in event or not valid_counter:
+                    unsigned += 1
+                elif counter > max_event_counter:
+                    max_event_counter = counter
+                if not valid_counter or counter > anchored_counter:
+                    stamp = _timestamp(event.get("fecha"))
+                    if stamp is not None and (oldest_pending_time is None or stamp < oldest_pending_time):
+                        oldest_pending_time = stamp
+
             pending = max(0, max(len(node_events), max_event_counter) - anchored_counter)
-            integrity = int(result["integrity"]["ok"] and result["authenticity"]["ok"])
+            delay_seconds = max(0.0, now - oldest_pending_time) if oldest_pending_time is not None else 0.0
+
             lines.extend(
                 [
                     f'jade_capture_healthy{{node="{label}"}} 0',
@@ -143,13 +214,13 @@ def render_metrics() -> str:
                     f'jade_events_total{{node="{label}"}} {len(node_events)}',
                     f'jade_events_unsigned{{node="{label}"}} {unsigned}',
                     f'jade_pending_events{{node="{label}"}} {pending}',
-                    f'jade_anchor_delay_seconds{{node="{label}"}} {max(0, now - newest_time):.3f}',
+                    f'jade_anchor_delay_seconds{{node="{label}"}} {delay_seconds:.3f}',
                     f'jade_anchor_rejected{{node="{label}"}} {anchor_errors.get(node, 0)}',
-                    f'jade_integrity_ok{{node="{label}"}} {integrity}',
+                    f'jade_integrity_ok{{node="{label}"}} {overall_ok}',
                 ]
             )
         return "\n".join(lines) + "\n"
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
         return (
             "# TYPE jade_exporter_up gauge\n"
             "jade_exporter_up 1\n"
@@ -157,34 +228,65 @@ def render_metrics() -> str:
         )
 
 
+def evaluate_verification_snapshot(data_dir: Path | None = None) -> dict:
+    """Lee el ledger una sola vez (sin TOCTOU) y devuelve resultado + SHA-256 exacto."""
+    base = data_dir or DATA_DIR
+    events_path = base / "events.jsonl"
+    if not events_path.exists():
+        raise FileNotFoundError("events.jsonl not found")
+    _, _, _, cached_result, events_digest = _load_verified_bundle(base)
+    return {**cached_result, "ledger_sha256": events_digest}
+
+
+class BoundedHTTPServer(HTTPServer):
+    """Servidor HTTP con pool acotado de hilos para mitigar agotamiento de recursos."""
+
+    def __init__(self, server_address, RequestHandlerClass, max_workers: int = 8):
+        super().__init__(server_address, RequestHandlerClass)
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+
+    def process_request(self, request, client_address):
+        self._executor.submit(self._process_request_thread, request, client_address)
+
+    def _process_request_thread(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+
+    def server_close(self):
+        super().server_close()
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
 class MetricsHandler(BaseHTTPRequestHandler):
+    timeout = 5
+
+    def _write_json(self, status_code: int, payload: dict) -> None:
+        body = strict_json_dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         if self.path == "/verify":
-            events_path = DATA_DIR / "events.jsonl"
             try:
-                events = read_events(events_path)
-                anchors_path = DATA_DIR / "anchors.json"
-                anchors = json.loads(anchors_path.read_text(encoding="utf-8")) if anchors_path.exists() else None
-                key_path = DATA_DIR / "trusted-public-key.b64"
-                result = verify_evidence(
-                    events,
-                    load_public_key(key_path) if key_path.exists() else None,
-                    anchors,
+                result = evaluate_verification_snapshot()
+                self._write_json(200, result)
+            except FileNotFoundError:
+                self._write_json(
+                    400,
+                    {"status": "invalid", "code": "missing_evidence", "error": "Archivo de eventos ausente"},
                 )
-                result["ledger_sha256"] = hashlib.sha256(events_path.read_bytes()).hexdigest()
-                body = json.dumps(result, ensure_ascii=False).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-                body = json.dumps({"status": "invalid", "error": str(exc)}).encode("utf-8")
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+            except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
+                self._write_json(
+                    400,
+                    {"status": "invalid", "code": "verification_error", "error": "No fue posible verificar la evidencia local"},
+                )
             return
         if self.path != "/metrics":
             self.send_error(404)
@@ -202,5 +304,5 @@ class MetricsHandler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("METRICS_PORT", "9108"))
-    host = os.environ.get("METRICS_HOST", "0.0.0.0")
-    ThreadingHTTPServer((host, port), MetricsHandler).serve_forever()
+    host = os.environ.get("METRICS_HOST", "127.0.0.1")
+    BoundedHTTPServer((host, port), MetricsHandler).serve_forever()

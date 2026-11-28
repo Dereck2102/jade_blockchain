@@ -9,7 +9,7 @@ La clave Ed25519, `signer-state.json` y el registro de solicitudes son un conjun
 
    ```sh
    mkdir -p "$HOME/jade-backups"
-   for volume in jade-blockchain-chain-network jade-blockchain-besu-data jade-blockchain-events; do
+   for volume in jade-blockchain-chain-network jade-blockchain-besu-data jade-blockchain-events jade-blockchain-signer; do
      docker run --rm -v "$volume:/source:ro" -v "$HOME/jade-backups:/backup" \
        busybox:1.37.0 sh -c 'tar -czf "/backup/$1.tar.gz" -C /source .' sh "$volume"
    done
@@ -24,16 +24,18 @@ La clave Ed25519, `signer-state.json` y el registro de solicitudes son un conjun
 ## Restauración
 
 1. Detén Compose y conserva una copia del estado actual antes de restaurar.
-2. Configura `.env` con nombres nuevos de destino (`JADE_CHAIN_VOLUME=jade-restore-chain`, `JADE_BESU_VOLUME=jade-restore-besu`, `JADE_EVENTS_VOLUME=jade-restore-events`). Esto conserva los volúmenes originales sin sobrescribirlos.
+2. Configura `.env` con nombres nuevos de destino (`JADE_CHAIN_VOLUME=jade-restore-chain`, `JADE_BESU_VOLUME=jade-restore-besu`, `JADE_EVENTS_VOLUME=jade-restore-events`, `JADE_SIGNER_VOLUME=jade-restore-signer`). Esto conserva los volúmenes originales sin sobrescribirlos.
 3. Crea y carga los volúmenes desde el mismo conjunto consistente:
 
    ```sh
    docker volume create jade-restore-chain
    docker volume create jade-restore-besu
    docker volume create jade-restore-events
+   docker volume create jade-restore-signer
    for pair in "jade-restore-chain:jade-blockchain-chain-network" \
                "jade-restore-besu:jade-blockchain-besu-data" \
-               "jade-restore-events:jade-blockchain-events"; do
+               "jade-restore-events:jade-blockchain-events" \
+               "jade-restore-signer:jade-blockchain-signer"; do
      target=${pair%%:*}
      archive=${pair#*:}
      docker run --rm -v "$target:/target" -v "$HOME/jade-backups:/backup:ro" \

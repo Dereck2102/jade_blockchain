@@ -95,7 +95,126 @@ class SignerMetricsTests(unittest.TestCase):
         with patch.object(metrics, "DATA_DIR", data_dir):
             rendered = metrics.render_metrics()
         self.assertIn('jade_pending_events{node="demo-node"} 0', rendered)
+        self.assertIn('jade_anchor_delay_seconds{node="demo-node"} 0.000', rendered)
         self.assertIn('jade_integrity_ok{node="demo-node"} 1', rendered)
+
+    def test_wipe_and_restart_attack_sets_integrity_metric_to_zero(self):
+        import base64
+        from unittest.mock import patch
+        from jadeblock import metrics
+        from jadeblock.protocol import public_key_bytes
+
+        data_dir = Path(self.temporary.name) / "attack5-metrics"
+        signer = EventSigner(data_dir / "signer")
+        restarted = signer.sign(
+            {
+                "fecha": "2026-11-05T10:00:01Z",
+                "nodo": "demo-node",
+                "origen": "test",
+                "tipo": "reinicio",
+                "nivel": "info",
+                "hash_anterior": "0" * 64,
+            },
+            "a5-1",
+        )
+        (data_dir / "events.jsonl").write_text(json.dumps(restarted) + "\n", encoding="utf-8")
+        (data_dir / "trusted-public-key.b64").write_text(
+            base64.b64encode(public_key_bytes(signer.public_key())).decode("ascii") + "\n",
+            encoding="ascii",
+        )
+        (data_dir / "anchors.json").write_text(
+            json.dumps([{"nodo": "demo-node", "firma_n": 4, "hash": "a" * 64}]),
+            encoding="utf-8",
+        )
+        with patch.object(metrics, "DATA_DIR", data_dir):
+            rendered = metrics.render_metrics()
+        self.assertIn('jade_integrity_ok{node="demo-node"} 0', rendered)
+
+    def test_isolated_signer_manifest_and_http_endpoints(self):
+        import base64
+        import hashlib
+        import io
+        from unittest.mock import patch
+        from jadeblock import metrics
+        from jadeblock.protocol import public_key_bytes
+
+        class _InMemorySocket:
+            def __init__(self, raw_request: bytes):
+                self._rfile = io.BytesIO(raw_request)
+                self.output = io.BytesIO()
+                self.timeout = None
+
+            def settimeout(self, value):
+                self.timeout = value
+
+            def makefile(self, mode: str, *_args, **_kwargs):
+                return self._rfile if "r" in mode else self.output
+
+            def sendall(self, data: bytes):
+                self.output.write(data)
+
+        def invoke_http(path_str: str) -> tuple[int, str]:
+            sock = _InMemorySocket(f"GET {path_str} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode("ascii"))
+            metrics.MetricsHandler(sock, ("127.0.0.1", 12345), None)
+            raw_resp = sock.output.getvalue().decode("utf-8", errors="replace")
+            header_block, _, body = raw_resp.partition("\r\n\r\n")
+            status_code = int(header_block.splitlines()[0].split()[1])
+            return status_code, body
+
+        isolated_signer_dir = Path(self.temporary.name) / "isolated-signer"
+        data_dir = Path(self.temporary.name) / "public-data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        signer = EventSigner(isolated_signer_dir)
+        ev = signer.sign(
+            {
+                "fecha": "2026-11-05T10:00:01Z",
+                "nodo": "demo-node",
+                "origen": "test",
+                "tipo": "creado",
+                "nivel": "info",
+                "hash_anterior": "0" * 64,
+            },
+            "iso-1",
+        )
+        ledger_bytes = (json.dumps(ev, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        (data_dir / "events.jsonl").write_bytes(ledger_bytes)
+        (data_dir / "trusted-public-key.b64").write_text(
+            base64.b64encode(public_key_bytes(signer.public_key())).decode("ascii") + "\n",
+            encoding="ascii",
+        )
+        signer.write_status_manifest(target_path=data_dir / "signer-status.json")
+
+        # Sin ed25519.key en data_dir/signer, el exportador valida el manifiesto firmado.
+        self.assertTrue(
+            _signer_ready(
+                data_dir / "signer",
+                signer.public_key(),
+                status_path=data_dir / "signer-status.json",
+            )
+        )
+
+        with patch.object(metrics, "DATA_DIR", data_dir):
+            code_m, body_m = invoke_http("/metrics")
+            self.assertEqual(code_m, 200)
+            self.assertIn('jade_signer_ready{node="demo-node"} 1', body_m)
+
+            code_v, body_v = invoke_http("/verify")
+            verified = json.loads(body_v)
+            self.assertEqual(code_v, 200)
+            self.assertEqual(
+                verified["ledger_sha256"],
+                hashlib.sha256(ledger_bytes).hexdigest(),
+            )
+
+            code_404, _ = invoke_http("/nope")
+            self.assertEqual(code_404, 404)
+
+            (data_dir / "events.jsonl").unlink()
+            code_400, body_400 = invoke_http("/verify")
+            self.assertEqual(code_400, 400)
+            err_payload = json.loads(body_400)
+            self.assertEqual(err_payload["code"], "missing_evidence")
+            self.assertNotIn(str(data_dir), err_payload["error"])
 
 
 if __name__ == "__main__":

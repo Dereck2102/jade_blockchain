@@ -26,12 +26,14 @@ En arquitecturas efímeras (funciones serverless y contenedores de corta duraci�
 
 ## ¿Dónde está cada parte?
 
-- [`jadeblock/`](jadeblock) — Protocolo v1, firmador durable, CLI, verificador y métricas.
+- [`jadeblock/`](jadeblock) — Protocolo v1, firmador durable, simulador de funciones efímeras (`simulate`), adaptador `SignerBackend`, CLI, verificador y métricas.
+- [`enclave/`](enclave) — Empaquetado experimental con Gramine 1.9 (`direct` / `sgx`) para el servicio `enclave_server`.
+- [`schemas/`](schemas) — Esquemas JSON Draft 2020-12 de eventos firmados y reportes de verificación.
 - [`chain/`](chain) — Contrato `AnchorRegistry.sol`, compilación, despliegue, anclaje periódico y verificador on-chain.
 - [`observability/`](observability) — Configuración de Prometheus, alertas y dashboard de Grafana.
 - [`infrastructure/proxmox/`](infrastructure/proxmox) y [`ansible/`](ansible) — Base para crear y configurar 3 contenedores LXC en Proxmox.
 - [`tests/`](tests) — Pruebas unitarias, sonda del firmador y matriz automatizada de 6 ataques (`MITRE ATT&CK TA0005`).
-- [`docs/`](docs) — [Arquitectura](docs/ARCHITECTURE.md), [modelo de amenazas](docs/THREAT_MODEL.md), [operación](docs/OPERATIONS.md), [restauración](docs/RESTORE.md), [decisiones](docs/DECISIONS.md) y [hoja de ruta](docs/ROADMAP.md).
+- [`docs/`](docs) — [Arquitectura](docs/ARCHITECTURE.md), [modelo de amenazas](docs/THREAT_MODEL.md), [trazabilidad NIST/ISO/SOLID](docs/STANDARDS_MAPPING.md), [operación](docs/OPERATIONS.md), [restauración](docs/RESTORE.md), [decisiones](docs/DECISIONS.md) y [hoja de ruta](docs/ROADMAP.md).
 
 ## ¿Cómo probarlo?
 
@@ -65,6 +67,8 @@ python -m pip install .
 python -m unittest discover -s tests -v
 python -m jadeblock.cli generate --events data/events.jsonl \
   --state-dir data/signer --public-key data/trusted-public-key.b64 --request-id demo-001
+python -m jadeblock.cli simulate --events data/events.jsonl \
+  --state-dir data/signer --public-key data/trusted-public-key.b64 --function autenticar --fail
 python -m jadeblock.cli verify --events data/events.jsonl \
   --public-key data/trusted-public-key.b64 --anchors data/anchors.json
 ```

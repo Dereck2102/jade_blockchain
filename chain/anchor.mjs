@@ -1,39 +1,39 @@
 import fs from "node:fs";
-import crypto from "node:crypto";
-import solc from "solc";
+import { Contract, Wallet } from "ethers";
 import {
-  Contract,
-  JsonRpcProvider,
-  Wallet,
-  keccak256,
-} from "ethers";
+  atomicWriteJson,
+  compileRegistry,
+  createRpcProvider,
+  fetchVerifierSnapshot,
+  indexByNodeAndCounter,
+  parseVerifiedLedger,
+  signatureDigestHex,
+  toSafeCounter,
+  validateLocalAnchors,
+  verifyDeployedContract,
+  waitForRpc,
+  withFileLock,
+} from "./lib.mjs";
 
 const dataDir = process.env.JADE_DATA ?? "/data";
 const chainDir = process.env.CHAIN_DATA ?? "/chain";
 const nodeName = process.env.JADE_NODE ?? "demo-node";
-const anchorIntervalSeconds = Number(process.env.ANCHOR_INTERVAL_SECONDS ?? "0");
-if (!Number.isFinite(anchorIntervalSeconds) || anchorIntervalSeconds < 0) {
-  throw new Error("ANCHOR_INTERVAL_SECONDS debe ser un número mayor o igual a cero");
-}
 
 function recordAnchorError() {
-  const path = `${dataDir}/anchor-errors.json`;
-  const node = process.env.JADE_NODE ?? "demo-node";
+  const errorPath = `${dataDir}/anchor-errors.json`;
   let state = { counts: {} };
   try {
-    if (fs.existsSync(path)) state = JSON.parse(fs.readFileSync(path, "utf8"));
+    if (fs.existsSync(errorPath)) state = JSON.parse(fs.readFileSync(errorPath, "utf8"));
   } catch {
     state = { counts: {} };
   }
-  const temp = `${path}.${process.pid}.tmp`;
   try {
     const counts = state?.counts && typeof state.counts === "object" && !Array.isArray(state.counts)
       ? state.counts
       : Object.create(null);
-    const previous = counts[node];
-    counts[node] = (Number.isSafeInteger(previous) && previous >= 0 ? previous : 0) + 1;
-    fs.writeFileSync(temp, `${JSON.stringify({ counts })}\n`, { mode: 0o600 });
-    fs.renameSync(temp, path);
+    const previous = counts[nodeName];
+    counts[nodeName] = (Number.isSafeInteger(previous) && previous >= 0 ? previous : 0) + 1;
+    atomicWriteJson(errorPath, { counts }, 0o600);
   } catch {
     // Keep the original failure visible even if local metric state cannot be written.
   }
@@ -42,61 +42,39 @@ function recordAnchorError() {
 process.on("uncaughtException", (error) => {
   recordAnchorError();
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });
-const source = fs.readFileSync(new URL("./AnchorRegistry.sol", import.meta.url), "utf8");
-const input = {
-  language: "Solidity",
-  sources: { "AnchorRegistry.sol": { content: source } },
-  settings: {
-    optimizer: { enabled: true, runs: 200 },
-    evmVersion: "london",
-    outputSelection: {
-      "*": { "*": ["abi", "evm.bytecode.object", "evm.deployedBytecode.object"] },
-    },
-  },
-};
-const output = JSON.parse(solc.compile(JSON.stringify(input)));
-const errors = (output.errors ?? []).filter(({ severity }) => severity === "error");
-if (errors.length) throw new Error(errors.map(({ formattedMessage }) => formattedMessage).join("\n"));
-const artifact = output.contracts["AnchorRegistry.sol"].AnchorRegistry;
+
+const anchorIntervalSeconds = Number(process.env.ANCHOR_INTERVAL_SECONDS ?? "0");
+if (!Number.isFinite(anchorIntervalSeconds) || anchorIntervalSeconds < 0) {
+  throw new Error("ANCHOR_INTERVAL_SECONDS debe ser un número mayor o igual a cero");
+}
+
+const compiled = compileRegistry();
 const deployment = JSON.parse(fs.readFileSync(`${chainDir}/contract.json`, "utf8"));
 const wallet = new Wallet(fs.readFileSync(`${chainDir}/deployer.key`, "utf8").trim());
-const provider = new JsonRpcProvider(process.env.BESU_RPC_URL ?? "http://besu:8545");
-const contract = new Contract(deployment.address, artifact.abi, wallet.connect(provider));
-const code = await provider.getCode(deployment.address);
-if (code === "0x" || keccak256(code) !== keccak256(`0x${artifact.evm.deployedBytecode.object}`)) {
-  throw new Error("El bytecode on-chain difiere del contrato compilado desde el fuente");
-}
-if (deployment.source_sha256 !== crypto.createHash("sha256").update(source).digest("hex")) {
-  throw new Error("El hash de fuente desplegado no coincide");
-}
+const provider = createRpcProvider(process.env.BESU_RPC_URL ?? "http://besu:8545");
+await waitForRpc(provider);
+await verifyDeployedContract(provider, deployment, compiled);
+const contract = new Contract(deployment.address, compiled.abi, wallet.connect(provider));
 
-function persistAnchors(anchorsPath, local) {
-  const temp = `${anchorsPath}.${process.pid}.tmp`;
-  const fd = fs.openSync(temp, "w", 0o600);
-  try {
-    fs.writeFileSync(fd, `${JSON.stringify(local, null, 2)}\n`);
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-  fs.renameSync(temp, anchorsPath);
-}
-
-async function anchorLatestOnce() {
-  const eventsPath = `${dataDir}/events.jsonl`;
+async function anchorLatestOnce({ allowMissingEvidence = false } = {}) {
+  const verifierUrl = process.env.VERIFIER_URL ?? "http://metrics:9108/verify";
   let verifierResponse;
   for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
-      verifierResponse = await fetch(process.env.VERIFIER_URL ?? "http://metrics:9108/verify");
+      verifierResponse = await fetchVerifierSnapshot(verifierUrl);
       break;
     } catch {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
     }
   }
   if (!verifierResponse) throw new Error("El verificador Python no está disponible");
   const verification = await verifierResponse.json();
+  if (!verifierResponse.ok && allowMissingEvidence && verification?.code === "missing_evidence") {
+    console.log("Aún no existen eventos para anclar.");
+    return;
+  }
   if (
     !verifierResponse.ok
     || !verification.integrity?.ok
@@ -105,101 +83,126 @@ async function anchorLatestOnce() {
   ) {
     throw new Error("El verificador Python no confirmó integridad y autenticidad");
   }
-  const ledger = fs.readFileSync(eventsPath);
-  if (crypto.createHash("sha256").update(ledger).digest("hex") !== verification.ledger_sha256) {
-    throw new Error("El ledger cambió después de la verificación Python");
-  }
-  const events = ledger.toString("utf8")
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
-  if (!events.length) throw new Error("No se ancla evidencia vacía");
 
+  const eventsPath = `${dataDir}/events.jsonl`;
   const anchorsPath = `${dataDir}/anchors.json`;
-  const local = fs.existsSync(anchorsPath) ? JSON.parse(fs.readFileSync(anchorsPath, "utf8")) : [];
-  if (!Array.isArray(local)) throw new Error("Estado local de anclas mal formado");
-  const remoteCounter = Number(await contract.lastCounter(nodeName));
-  const localCounters = local.filter((anchor) => anchor.nodo === nodeName)
-    .map((anchor) => anchor.firma_n).sort((a, b) => a - b);
-  if (localCounters.some((counter, index) => !Number.isSafeInteger(counter) || counter < 1 || (index > 0 && counter <= localCounters[index - 1]))) {
-    throw new Error("El estado local de anclas tiene duplicados, valores inválidos o regresiones");
-  }
-  const localCounter = localCounters.at(-1) ?? 0;
-  if (remoteCounter < localCounter) {
-    throw new Error(`Regresión remota: cadena=${remoteCounter}, estado local=${localCounter}`);
-  }
-  const nodeEvents = events.filter((event) => event.nodo === nodeName);
-  if (!nodeEvents.length) throw new Error(`No hay eventos locales para ${nodeName}`);
-  const maxEventCounter = nodeEvents.at(-1).firma_n;
-  if (remoteCounter > maxEventCounter) {
-    throw new Error("La cadena contiene anclas posteriores a los eventos locales");
-  }
+  const lockPath = `${dataDir}/.anchors.lock`;
 
-  const checkpointsToVerify = [...new Set([...localCounters, ...(remoteCounter > 0 ? [remoteCounter] : [])])]
-    .sort((a, b) => a - b);
-  for (const counter of checkpointsToVerify) {
-    const event = nodeEvents.find((item) => item.firma_n === counter);
-    const remoteHash = await contract.eventHashAt(nodeName, counter);
-    const expectedSignatureHash = `0x${crypto.createHash("sha256").update(Buffer.from(event?.firma ?? "", "base64")).digest("hex")}`;
-    const remoteSignatureHash = await contract.signatureHashAt(nodeName, counter);
-    const remoteTimestamp = Number(await contract.anchorTimestampAt(nodeName, counter));
-    if (
-      !event
-      || remoteHash.toLowerCase() !== `0x${event.hash}`.toLowerCase()
-      || remoteSignatureHash.toLowerCase() !== expectedSignatureHash.toLowerCase()
-      || remoteTimestamp <= 0
-    ) {
-      throw new Error(`Ancla remota inconsistente para ${nodeName}/${counter}`);
+  await withFileLock(lockPath, async () => {
+    const ledger = fs.readFileSync(eventsPath);
+    const events = parseVerifiedLedger(ledger, verification.ledger_sha256, verification.event_count);
+    if (!events.length) throw new Error("No se ancla evidencia vacía");
+
+    const local = validateLocalAnchors(
+      fs.existsSync(anchorsPath) ? JSON.parse(fs.readFileSync(anchorsPath, "utf8")) : []
+    );
+    const eventsIndex = indexByNodeAndCounter(events);
+    const anchorsIndex = indexByNodeAndCounter(local);
+    const nodeBucket = eventsIndex.get(nodeName);
+    const nodeAnchorBucket = anchorsIndex.get(nodeName);
+    const remoteCounter = toSafeCounter(await contract.lastCounter(nodeName), "lastCounter");
+    const localCounters = (nodeAnchorBucket?.list ?? [])
+      .map((anchor) => anchor.firma_n)
+      .sort((a, b) => a - b);
+    if (localCounters.some((counter, index) => index > 0 && counter <= localCounters[index - 1])) {
+      throw new Error("El estado local de anclas tiene duplicados o regresiones");
     }
-    if (!local.some((anchor) => anchor.nodo === nodeName && anchor.firma_n === counter)) {
+    const localCounter = localCounters.at(-1) ?? 0;
+    if (remoteCounter < localCounter) {
+      throw new Error(`Regresión remota: cadena=${remoteCounter}, estado local=${localCounter}`);
+    }
+    const nodeEvents = nodeBucket?.list ?? [];
+    if (!nodeEvents.length) throw new Error(`No hay eventos locales para ${nodeName}`);
+    const maxEventCounter = nodeEvents.at(-1).firma_n;
+    if (remoteCounter > maxEventCounter) {
+      throw new Error("La cadena contiene anclas posteriores a los eventos locales");
+    }
+
+    const checkpointsToVerify = [...new Set([...localCounters, ...(remoteCounter > 0 ? [remoteCounter] : [])])]
+      .sort((a, b) => a - b);
+    for (const counter of checkpointsToVerify) {
+      const event = nodeBucket.byCounter.get(counter);
+      const remoteHash = await contract.eventHashAt(nodeName, counter);
+      const expectedSigHash = event ? signatureDigestHex(event.firma) : "";
+      const remoteSignatureHash = await contract.signatureHashAt(nodeName, counter);
+      const remoteTimestamp = toSafeCounter(
+        await contract.anchorTimestampAt(nodeName, counter),
+        "anchorTimestampAt"
+      );
+      const localEntry = nodeAnchorBucket?.byCounter.get(counter);
+      if (
+        !event
+        || remoteHash.toLowerCase() !== `0x${event.hash}`.toLowerCase()
+        || remoteSignatureHash.toLowerCase() !== expectedSigHash.toLowerCase()
+        || remoteTimestamp <= 0
+        || (localEntry && localEntry.hash !== event.hash)
+      ) {
+        throw new Error(`Ancla remota inconsistente para ${nodeName}/${counter}`);
+      }
+      if (!localEntry) {
+        local.push({
+          nodo: nodeName,
+          firma_n: counter,
+          hash: event.hash,
+          transaction_hash: null,
+          anchored_at: remoteTimestamp,
+        });
+      }
+    }
+
+    const latestEvent = nodeEvents.at(-1);
+    if (latestEvent.firma_n > remoteCounter) {
+      const signatureHash = signatureDigestHex(latestEvent.firma);
+      const tx = await contract.anchor(nodeName, latestEvent.firma_n, `0x${latestEvent.hash}`, signatureHash);
+      const receipt = await tx.wait(1, 60_000);
+      const block = await provider.getBlock(receipt.blockNumber);
       local.push({
         nodo: nodeName,
-        firma_n: counter,
-        hash: event.hash,
-        transaction_hash: null,
-        anchored_at: remoteTimestamp,
+        firma_n: latestEvent.firma_n,
+        hash: latestEvent.hash,
+        transaction_hash: receipt.hash,
+        anchored_at: toSafeCounter(block.timestamp, "block.timestamp"),
       });
+      atomicWriteJson(anchorsPath, local, 0o644);
+      console.log(`Verificados ${events.length} eventos; último prefijo anclado en contador ${latestEvent.firma_n}`);
+    } else {
+      atomicWriteJson(anchorsPath, local, 0o644);
+      console.log(`Verificados ${events.length} eventos; sin cambios desde contador ${remoteCounter}`);
     }
-  }
-
-  const latestEvent = nodeEvents.at(-1);
-  if (latestEvent.firma_n > remoteCounter) {
-    const signatureHash = `0x${crypto.createHash("sha256").update(Buffer.from(latestEvent.firma, "base64")).digest("hex")}`;
-    const tx = await contract.anchor(nodeName, latestEvent.firma_n, `0x${latestEvent.hash}`, signatureHash);
-    const receipt = await tx.wait();
-    const block = await provider.getBlock(receipt.blockNumber);
-    local.push({
-      nodo: nodeName,
-      firma_n: latestEvent.firma_n,
-      hash: latestEvent.hash,
-      transaction_hash: receipt.hash,
-      anchored_at: Number(block.timestamp),
-    });
-    persistAnchors(anchorsPath, local);
-    console.log(`Verificados ${events.length} eventos; último prefijo anclado en contador ${latestEvent.firma_n}`);
-  } else {
-    persistAnchors(anchorsPath, local);
-    console.log(`Verificados ${events.length} eventos; sin cambios desde contador ${remoteCounter}`);
-  }
+  });
 }
 
 if (anchorIntervalSeconds === 0) {
-  await anchorLatestOnce();
-} else {
-  let stopRequested = false;
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => {
-      stopRequested = true;
-    });
+  try {
+    await anchorLatestOnce({ allowMissingEvidence: false });
+  } catch (error) {
+    recordAnchorError();
+    console.error(error);
+    process.exit(1);
   }
-  while (!stopRequested) {
+} else {
+  const stopController = new AbortController();
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.on(signal, () => stopController.abort());
+  }
+  while (!stopController.signal.aborted) {
     try {
-      await anchorLatestOnce();
+      await anchorLatestOnce({ allowMissingEvidence: true });
     } catch (error) {
       recordAnchorError();
       console.error(error);
     }
-    if (stopRequested) break;
-    await new Promise((resolve) => setTimeout(resolve, anchorIntervalSeconds * 1000));
+    if (stopController.signal.aborted) break;
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, anchorIntervalSeconds * 1_000);
+      stopController.signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true }
+      );
+    });
   }
 }

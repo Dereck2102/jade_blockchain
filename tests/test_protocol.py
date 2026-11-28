@@ -248,6 +248,314 @@ class SignerPersistenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no coincide"):
             generate(args)
 
+    def test_strict_validation_rejects_nan_bad_hex_bool_counter_and_missing_fields(self):
+        with self.assertRaises(ValueError):
+            sign_event({**BODY, "datos": {"x": float("nan")}}, 1, self.key if hasattr(self, "key") else Ed25519PrivateKey.generate())
+        key = Ed25519PrivateKey.generate()
+        with self.assertRaises(ValueError):
+            sign_event({**BODY, "hash_anterior": "0x" + "0" * 62}, 1, key)
+        with self.assertRaises(ValueError):
+            sign_event({**BODY, "hash_anterior": "0_" + "0" * 62}, 1, key)
+        with self.assertRaises(ValueError):
+            sign_event(BODY, True, key)
+        with self.assertRaises(ValueError):
+            sign_event(BODY, 0, key)
+
+        valid = sign_event(BODY, 1, key)
+        missing_type = {k: v for k, v in valid.items() if k != "tipo"}
+        result = verify_evidence([missing_type], key.public_key(), None)
+        self.assertFalse(result["integrity"]["ok"])
+        self.assertEqual(result["status"], "invalid")
+        self.assertEqual(verify_evidence(["no-es-dict"], key.public_key(), None)["status"], "invalid")
+
+    def test_interleaved_multinode_chain_and_checkpoints_verify(self):
+        key = Ed25519PrivateKey.generate()
+        e1 = sign_event({**BODY, "nodo": "nodo-1", "hash_anterior": ZERO_HASH}, 1, key)
+        e2 = sign_event({**BODY, "nodo": "nodo-2", "hash_anterior": e1["hash"]}, 1, key)
+        e3 = sign_event({**BODY, "nodo": "nodo-1", "hash_anterior": e2["hash"]}, 2, key)
+        anchors = [
+            {"nodo": "nodo-1", "firma_n": 2, "hash": e3["hash"]},
+            {"nodo": "nodo-2", "firma_n": 1, "hash": e2["hash"]},
+        ]
+        result = verify_evidence([e1, e2, e3], key.public_key(), anchors)
+        self.assertTrue(result["integrity"]["ok"])
+        self.assertTrue(result["authenticity"]["ok"])
+        self.assertEqual(result["anchor_coverage"]["status"], "local_only")
+        self.assertEqual(
+            result["anchor_coverage"]["anchored_prefix_by_node"],
+            {"nodo-1": 2, "nodo-2": 1},
+        )
+
+    def test_cli_main_exit_codes_trusted_key_protection_and_pruning(self):
+        from jadeblock.cli import main
+
+        events_path = Path(self.temporary.name) / "cli-main-events.jsonl"
+        state_dir = Path(self.temporary.name) / "cli-main-signer"
+        pub_path = Path(self.temporary.name) / "cli-main-pub.b64"
+        anchors_path = Path(self.temporary.name) / "cli-main-anchors.json"
+
+        code_gen = main(
+            [
+                "generate",
+                "--events",
+                str(events_path),
+                "--state-dir",
+                str(state_dir),
+                "--public-key",
+                str(pub_path),
+                "--request-id",
+                "r-1",
+            ]
+        )
+        self.assertEqual(code_gen, 0)
+        code_verify_incomplete = main(
+            [
+                "verify",
+                "--events",
+                str(events_path),
+                "--public-key",
+                str(pub_path),
+                "--anchors",
+                str(anchors_path),
+            ]
+        )
+        self.assertEqual(code_verify_incomplete, 2)
+
+        # No debe sobrescribir una clave pública confiable distinta ya existente.
+        other_signer_dir = Path(self.temporary.name) / "other-signer"
+        other_pub_path = Path(self.temporary.name) / "other-pub.b64"
+        code_other = main(
+            [
+                "generate",
+                "--events",
+                str(Path(self.temporary.name) / "other-events.jsonl"),
+                "--state-dir",
+                str(other_signer_dir),
+                "--public-key",
+                str(other_pub_path),
+            ]
+        )
+        self.assertEqual(code_other, 0)
+        code_mismatch = main(
+            [
+                "generate",
+                "--events",
+                str(events_path),
+                "--state-dir",
+                str(state_dir),
+                "--public-key",
+                str(other_pub_path),
+                "--request-id",
+                "r-2",
+            ]
+        )
+        self.assertEqual(code_mismatch, 1)
+        self.assertEqual(EventSigner(state_dir).counter(), 1)
+
+        # Poda de solicitudes confirmadas conserva solicitudes pendientes.
+        signer = EventSigner(state_dir)
+        recorded = {e["hash"] for e in json.loads("[" + ",".join(events_path.read_text(encoding="utf-8").splitlines()) + "]")}
+        e2 = signer.sign({**BODY, "hash_anterior": next(iter(recorded))}, "r-2")
+        e3_pending = signer.sign({**BODY, "hash_anterior": e2["hash"]}, "r-3-pending")
+        signer.prune_confirmed_requests(recorded | {e2["hash"]}, max_retained=1)
+        remaining = signer.request_events()
+        self.assertNotIn("r-1", remaining)
+        self.assertIn("r-2", remaining)
+        self.assertEqual(remaining["r-3-pending"], e3_pending)
+
+    def test_cli_handles_cp1252_stdout_without_unicode_error(self):
+        import io
+        from unittest.mock import patch
+        from jadeblock.cli import main
+
+        events_path = Path(self.temporary.name) / "cp1252-events.jsonl"
+        state_dir = Path(self.temporary.name) / "cp1252-signer"
+        pub_path = Path(self.temporary.name) / "cp1252-pub.b64"
+
+        signer = EventSigner(state_dir)
+        signer.sign(BODY, "unicode-snow")  # Contiene '雪' (\u96ea), no representable en cp1252
+
+        raw_out = io.BytesIO()
+        cp1252_stdout = io.TextIOWrapper(raw_out, encoding="cp1252", errors="strict")
+        with patch("sys.stdout", cp1252_stdout):
+            exit_code = main(
+                [
+                    "generate",
+                    "--events",
+                    str(events_path),
+                    "--state-dir",
+                    str(state_dir),
+                    "--public-key",
+                    str(pub_path),
+                    "--node",
+                    BODY["nodo"],
+                    "--request-id",
+                    "unicode-snow",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        decoded = raw_out.getvalue().decode("utf-8")
+        self.assertIn("café 雪", decoded)
+
+    def test_callback_backend_and_enclave_ipc_protocol(self):
+        from unittest.mock import patch
+        from jadeblock.backends import CallbackSignerBackend, EnclaveSignerClient
+        from jadeblock.cli import main
+        from jadeblock.enclave_server import dispatch_signer_request
+        from jadeblock.protocol import strict_json_dumps
+
+        key = Ed25519PrivateKey.generate()
+        bad_backend = CallbackSignerBackend(key.public_key(), lambda _msg: b"short")
+        with self.assertRaises(RuntimeError):
+            EventSigner(Path(self.temporary.name) / "bad-backend", backend=bad_backend).sign(
+                BODY, "bad-1"
+            )
+
+        enclave_dir = Path(self.temporary.name) / "enclave-state"
+        enclave_signer = EventSigner(
+            enclave_dir,
+            backend=CallbackSignerBackend(key.public_key(), key.sign),
+        )
+
+        def fake_request(_self, payload: dict) -> dict:
+            raw = (strict_json_dumps(payload) + "\n").encode("utf-8")
+            resp = dispatch_signer_request(enclave_signer, raw)
+            if not resp.get("ok"):
+                raise RuntimeError(resp.get("error", "err"))
+            return resp
+
+        events_path = Path(self.temporary.name) / "ipc-events.jsonl"
+        pub_path = Path(self.temporary.name) / "ipc-pub.b64"
+        status_path = Path(self.temporary.name) / "ipc-status.json"
+        with patch.object(EnclaveSignerClient, "_request", fake_request):
+            rc1 = main(
+                [
+                    "generate",
+                    "--signer-endpoint",
+                    "127.0.0.1:9201",
+                    "--events",
+                    str(events_path),
+                    "--public-key",
+                    str(pub_path),
+                    "--signer-status",
+                    str(status_path),
+                    "--node",
+                    "enclave-node",
+                    "--request-id",
+                    "ipc-1",
+                ]
+            )
+            rc1_retry = main(
+                [
+                    "generate",
+                    "--signer-endpoint",
+                    "127.0.0.1:9201",
+                    "--events",
+                    str(events_path),
+                    "--public-key",
+                    str(pub_path),
+                    "--signer-status",
+                    str(status_path),
+                    "--node",
+                    "enclave-node",
+                    "--request-id",
+                    "ipc-1",
+                ]
+            )
+        self.assertEqual(rc1, 0)
+        self.assertEqual(rc1_retry, 0)
+        lines = events_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["firma_n"], 1)
+
+        # Pinning de clave pública rechaza un endpoint que cambie de identidad.
+        rogue_key = Ed25519PrivateKey.generate()
+        client_pinned = EnclaveSignerClient(pinned_public_key=rogue_key.public_key())
+        with patch.object(EnclaveSignerClient, "_request", fake_request):
+            with self.assertRaisesRegex(RuntimeError, "no coincide con la clave fijada"):
+                client_pinned.public_key()
+
+    def test_serverless_lifecycle_simulation_and_schema_version_alignment(self):
+        import tomllib
+        from jadeblock import __version__
+        from jadeblock.cli import main
+        from jadeblock.verify import read_events, verify_files
+
+        events_path = Path(self.temporary.name) / "sim-events.jsonl"
+        state_dir = Path(self.temporary.name) / "sim-signer"
+        pub_path = Path(self.temporary.name) / "sim-pub.b64"
+
+        rc = main(
+            [
+                "simulate",
+                "--events",
+                str(events_path),
+                "--state-dir",
+                str(state_dir),
+                "--public-key",
+                str(pub_path),
+                "--node",
+                "nodo-efimero",
+                "--function",
+                "autenticar",
+                "--invocation-id",
+                "407813",
+                "--fail",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        # Reintento idempotente con el mismo invocation-id no duplica los 5 eventos.
+        rc_retry = main(
+            [
+                "simulate",
+                "--events",
+                str(events_path),
+                "--state-dir",
+                str(state_dir),
+                "--public-key",
+                str(pub_path),
+                "--node",
+                "nodo-efimero",
+                "--function",
+                "autenticar",
+                "--invocation-id",
+                "407813",
+                "--fail",
+            ]
+        )
+        self.assertEqual(rc_retry, 0)
+        events = read_events(events_path)
+        self.assertEqual(len(events), 5)
+        self.assertEqual(
+            [e["tipo"] for e in events],
+            [
+                "contenedor_create",
+                "contenedor_start",
+                "funcion_log",
+                "contenedor_die",
+                "contenedor_destroy",
+            ],
+        )
+        self.assertEqual(events[3]["datos"]["codigo_salida"], 1)
+        report = verify_files(events_path, pub_path, None)
+        self.assertTrue(report["integrity"]["ok"])
+        self.assertTrue(report["authenticity"]["ok"])
+
+        repo_root = Path(__file__).resolve().parents[1]
+        event_schema = json.loads((repo_root / "schemas" / "event-v1.schema.json").read_text(encoding="utf-8"))
+        report_schema = json.loads(
+            (repo_root / "schemas" / "verification-report-v1.schema.json").read_text(encoding="utf-8")
+        )
+        for req in event_schema["required"]:
+            self.assertIn(req, events[0])
+        for req in report_schema["required"]:
+            self.assertIn(req, report)
+
+        pyproject_ver = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+        pkg_json_ver = json.loads((repo_root / "chain" / "package.json").read_text(encoding="utf-8"))["version"]
+        self.assertEqual(__version__, pyproject_ver)
+        self.assertEqual(__version__, pkg_json_ver)
+
 
 if __name__ == "__main__":
     unittest.main()
